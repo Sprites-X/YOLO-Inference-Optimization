@@ -10,7 +10,7 @@ data/
 datasets/
 annotations/
 
-# ผลการวัด (ถ้าอยากเก็บผลจริงไว้ใน repo ให้ commit สำเนาไว้ใน results/ แทน)
+# ผลการวัด 
 results.jsonl
 accuracy.jsonl
 *.png

@@ -1,0 +1,23 @@
+# TensorRT engine — ผูกกับ GPU + เวอร์ชัน TRT ที่ build ใช้เครื่องอื่นไม่ได้
+*.engine
+*.plan
+*.cache
+
+# โมเดลและ dataset
+*.pt
+*.onnx
+data/
+datasets/
+annotations/
+
+# ผลการวัด (ถ้าอยากเก็บผลจริงไว้ใน repo ให้ commit สำเนาไว้ใน results/ แทน)
+results.jsonl
+accuracy.jsonl
+*.png
+!fig_*.png
+report_table.md
+
+# python
+.venv/
+__pycache__/
+*.pyc

@@ -1,0 +1,108 @@
+{
+  "checked_at": "2026-08-23T09:08:02.677387+00:00",
+  "checks": {
+    "PYTHONPATH ว่าง": {
+      "status": "pass",
+      "detail": "ไม่มีอะไร shadow venv"
+    },
+    "nvidia-smi": {
+      "status": "pass",
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 40 | 145.00 W | 3090 MHz"
+    },
+    "driver >= 570": {
+      "status": "pass",
+      "detail": "595.84"
+    },
+    "torch": {
+      "status": "pass",
+      "detail": "2.11.0+cu128 (built for CUDA 12.8)"
+    },
+    "compute capability": {
+      "status": "pass",
+      "detail": "(12, 0) = sm_120 Blackwell"
+    },
+    "รัน CUDA kernel จริง": {
+      "status": "pass",
+      "detail": "matmul สำเร็จ (checksum 4575.5)"
+    },
+    "FP16 matmul": {
+      "status": "pass",
+      "detail": "ใช้ได้"
+    },
+    "onnxruntime": {
+      "status": "pass",
+      "detail": "1.23.2 | providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']"
+    },
+    "ORT ใช้ CUDA จริง": {
+      "status": "pass",
+      "detail": "['CUDAExecutionProvider', 'CPUExecutionProvider']"
+    },
+    "tensorrt >= 10.8": {
+      "status": "pass",
+      "detail": "10.16.1.11"
+    },
+    "TensorRT 10 API": {
+      "status": "pass",
+      "detail": "ใช้ execute_async_v3 + set_tensor_address (ไม่ใช่ execute_v2)"
+    },
+    "สร้าง trt.Builder": {
+      "status": "pass",
+      "detail": "ได้"
+    },
+    "cuda-python": {
+      "status": "pass",
+      "detail": "12.9.7 via cuda.bindings.runtime"
+    },
+    "trtexec ใน PATH": {
+      "status": "warn",
+      "detail": "หาไม่เจอ — ปกติอยู่ที่ /usr/src/tensorrt/bin หรือใน site-packages/tensorrt_libs"
+    },
+    "ultralytics": {
+      "status": "pass",
+      "detail": "8.4.126"
+    },
+    "cv2": {
+      "status": "pass",
+      "detail": "5.0.0"
+    },
+    "numpy": {
+      "status": "pass",
+      "detail": "2.2.6"
+    },
+    "pycocotools": {
+      "status": "pass",
+      "detail": "2.0.11"
+    },
+    "CPU governor": {
+      "status": "pass",
+      "detail": "performance"
+    },
+    "GPU state ตอนนี้": {
+      "status": "pass",
+      "detail": "P1, 2632 MHz"
+    },
+    "system": {
+      "status": "pass",
+      "detail": "AMD Ryzen 5 7500F 6-Core Processor | py3.10.12"
+    }
+  },
+  "versions": {
+    "gpu_name": "NVIDIA GeForce RTX 5060",
+    "driver": "595.84",
+    "vram_total": "8151 MiB",
+    "torch": "2.11.0+cu128",
+    "torch_cuda": "12.8",
+    "compute_capability": "12.0",
+    "onnxruntime": "1.23.2",
+    "tensorrt": "10.16.1.11",
+    "cuda_python": "12.9.7",
+    "ultralytics": "8.4.126",
+    "cv2": "5.0.0",
+    "numpy": "2.2.6",
+    "pycocotools": "2.0.11",
+    "cpu_governor": "performance",
+    "os": "Linux-6.8.0-136-generic-x86_64-with-glibc2.35",
+    "python": "3.10.12",
+    "cpu": "AMD Ryzen 5 7500F 6-Core Processor"
+  }
+}

@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import subprocess
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+from common import (DEPLOY_CONF, DEPLOY_IOU, IMG_SIZE, postprocess,
+                    preprocess_batch)
+
+IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
+
+
+# ==========================================================================
+# GPU state
+# ==========================================================================
+def gpu_state() -> dict:
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=temperature.gpu,clocks.sm,power.draw,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip().split(",")
+        return {"temp_c": float(out[0]), "sm_clock_mhz": float(out[1]),
+                "power_w": float(out[2]), "mem_used_mb": float(out[3])}
+    except Exception:
+        return {}
+
+
+# ==========================================================================
+# Runners 
+# ==========================================================================
+class PyTorchRunner:
+    name = "PyTorch"
+
+    def __init__(self, model_path: str, device: str, half: bool = False):
+        import torch
+        from ultralytics import YOLO
+
+        self.torch = torch
+        self.device = device
+        self.half = half and device == "cuda"
+        self.precision = "FP16" if self.half else "FP32"
+
+        yolo = YOLO(model_path)
+        self.model = yolo.model.to(device).eval()
+        if self.half:
+            self.model = self.model.half()
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+
+        if device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+
+    def infer(self, batch: np.ndarray) -> np.ndarray:
+        t = self.torch.from_numpy(batch).to(self.device, non_blocking=False)
+        if self.half:
+            t = t.half()
+        with self.torch.inference_mode():
+            out = self.model(t)
+        out = out[0] if isinstance(out, (list, tuple)) else out
+        return out.float().cpu().numpy()
+
+    def sync(self):
+        if self.device == "cuda":
+            self.torch.cuda.synchronize()
+
+    def peak_vram_mb(self):
+        if self.device == "cuda":
+            return self.torch.cuda.max_memory_allocated() / 1024 / 1024
+        return None
+
+    def model_size_mb(self, path):
+        return Path(path).stat().st_size / 1024 / 1024
+
+
+class ONNXRunner:
+    name = "ONNX Runtime"
+    precision = "FP32"
+
+    def __init__(self, model_path: str, device: str):
+        import onnxruntime as ort
+
+        providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                     if device == "cuda" else ["CPUExecutionProvider"])
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+        self.sess = ort.InferenceSession(model_path, opts, providers=providers)
+        used = self.sess.get_providers()
+
+        
+        if device == "cuda" and "CUDAExecutionProvider" not in used:
+            raise RuntimeError(
+                f"ขอ CUDA แต่ ORT ใช้ {used} — ถ้าปล่อยผ่าน แถวนี้ในตารางจะเป็นตัวเลข CPU "
+                f"ที่ติดป้ายว่า GPU"
+            )
+        self.providers = used
+        self.iname = self.sess.get_inputs()[0].name
+        self.device = device
+
+    def infer(self, batch: np.ndarray) -> np.ndarray:
+        return self.sess.run(None, {self.iname: batch})[0]
+
+    def sync(self):
+        pass  
+
+    def peak_vram_mb(self):
+        return None
+
+    def model_size_mb(self, path):
+        return Path(path).stat().st_size / 1024 / 1024
+
+
+class TensorRTRunner:
+    name = "TensorRT"
+
+    def __init__(self, engine_path: str, batch: int = 1, size: int = IMG_SIZE):
+        import tensorrt as trt
+        try:
+            from cuda.bindings import runtime as cudart
+        except ImportError:
+            from cuda import cudart
+
+        self.trt, self.cudart = trt, cudart
+        logger = trt.Logger(trt.Logger.ERROR)
+        with open(engine_path, "rb") as f, trt.Runtime(logger) as rt:
+            self.engine = rt.deserialize_cuda_engine(f.read())
+        if self.engine is None:
+            raise RuntimeError(
+                f"โหลด engine ไม่ได้: {engine_path}\n"
+                f"engine ผูกกับ GPU + TensorRT เวอร์ชันที่ build — ถ้าเปลี่ยนอย่างใดอย่างหนึ่งต้อง build ใหม่"
+            )
+        self.ctx = self.engine.create_execution_context()
+
+        err, self.stream = cudart.cudaStreamCreate()
+        self._ck(err)
+
+    
+        self.inputs, self.outputs, self.ptrs = [], [], {}
+        for i in range(self.engine.num_io_tensors):
+            nm = self.engine.get_tensor_name(i)
+            is_in = self.engine.get_tensor_mode(nm) == trt.TensorIOMode.INPUT
+            shape = list(self.engine.get_tensor_shape(nm))
+            if is_in:
+                if shape[0] == -1:
+                    shape[0] = batch
+                    self.ctx.set_input_shape(nm, tuple(shape))
+                elif batch != shape[0]:
+                    raise RuntimeError(
+                        f"engine เป็น static batch {shape[0]} แต่ขอ batch {batch} "
+                        f"— build engine ใหม่ด้วย --min/opt/max-batch"
+                    )
+                self.inputs.append(nm)
+            else:
+                self.outputs.append(nm)
+
+        self.precision = self._detect_precision(engine_path)
+        self.batch = batch
+        self.host_out = {}
+        self.dev_mem = []
+
+        for nm in self.inputs + self.outputs:
+            shape = tuple(self.ctx.get_tensor_shape(nm))
+            dtype = trt.nptype(self.engine.get_tensor_dtype(nm))
+            nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
+            err, ptr = cudart.cudaMalloc(nbytes)
+            self._ck(err)
+            self.ptrs[nm] = (ptr, nbytes, shape, dtype)
+            self.dev_mem.append(ptr)
+            self.ctx.set_tensor_address(nm, int(ptr))
+            if nm in self.outputs:
+                self.host_out[nm] = np.empty(shape, dtype=dtype)
+
+        base = gpu_state().get("mem_used_mb")
+        self._vram_after_load = base
+
+    def _ck(self, err):
+        if err != self.cudart.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"CUDA error: {err}")
+
+    def _detect_precision(self, path: str) -> str:
+        p = Path(path).name.lower()
+        for tag, label in (("int8", "INT8"), ("fp16", "FP16"),
+                           ("half", "FP16"), ("fp32", "FP32")):
+            if tag in p:
+                return label
+        return "unknown"
+
+    def infer(self, batch: np.ndarray) -> np.ndarray:
+        cudart = self.cudart
+        nm_in = self.inputs[0]
+        ptr, nbytes, _, dtype = self.ptrs[nm_in]
+        arr = np.ascontiguousarray(batch, dtype=dtype)
+
+        self._ck(cudart.cudaMemcpyAsync(
+            ptr, arr.ctypes.data, arr.nbytes,
+            cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream))
+
+        if not self.ctx.execute_async_v3(self.stream):
+            raise RuntimeError("execute_async_v3 ล้มเหลว")
+
+        nm_out = self.outputs[0]
+        optr, onbytes, _, _ = self.ptrs[nm_out]
+        host = self.host_out[nm_out]
+        self._ck(cudart.cudaMemcpyAsync(
+            host.ctypes.data, optr, onbytes,
+            cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, self.stream))
+        return host
+
+    def sync(self):
+        self._ck(self.cudart.cudaStreamSynchronize(self.stream))
+
+    def peak_vram_mb(self):
+        cur = gpu_state().get("mem_used_mb")
+        return cur if cur is not None else None
+
+    def model_size_mb(self, path):
+        return Path(path).stat().st_size / 1024 / 1024
+
+    def close(self):
+        for p in self.dev_mem:
+            self.cudart.cudaFree(p)
+        self.dev_mem = []
+        self.cudart.cudaStreamDestroy(self.stream)
+
+
+# ==========================================================================
+# harness
+# ==========================================================================
+def load_images(d: str, limit: int) -> list[np.ndarray]:
+    files = sorted(p for p in Path(d).rglob("*") if p.suffix.lower() in IMG_EXT)[:limit]
+    if not files:
+        raise FileNotFoundError(f"ไม่เจอรูปใน {d}")
+    imgs = [cv2.imread(str(p)) for p in files]
+    imgs = [i for i in imgs if i is not None]
+    print(f"[data] โหลด {len(imgs)} รูปเข้า RAM (ตัด disk I/O ออกจากการวัด)")
+    return imgs
+
+
+def pct(vals: list[float], q: float) -> float:
+    s = sorted(vals)
+    k = min(int(round(q / 100 * (len(s) - 1))), len(s) - 1)
+    return s[k]
+
+
+def run_once(runner, imgs, batch, warmup, iters, do_post):
+    """หนึ่งรอบการวัด คืน dict ของ latency ทุก stage (มิลลิวินาที)"""
+    n = len(imgs)
+    batches = [imgs[i % n:i % n + batch] if i % n + batch <= n
+               else (imgs[i % n:] + imgs[:batch - (n - i % n)])
+               for i in range(0, n)]
+
+    for i in range(warmup):
+        x, _ = preprocess_batch(batches[i % len(batches)])
+        runner.infer(x)
+    runner.sync()
+
+    pre_ms, inf_ms, post_ms = [], [], []
+
+    for i in range(iters):
+        chunk = batches[i % len(batches)]
+
+        t0 = time.perf_counter()
+        x, metas = preprocess_batch(chunk)
+        t1 = time.perf_counter()
+
+        runner.sync()                 
+        t2 = time.perf_counter()
+        raw = runner.infer(x)
+        runner.sync()                 
+        t3 = time.perf_counter()
+
+        if do_post:
+            for b in range(len(metas)):
+                postprocess(raw[b] if raw.ndim == 3 else raw,
+                            metas[b], DEPLOY_CONF, DEPLOY_IOU)
+        t4 = time.perf_counter()
+
+        pre_ms.append((t1 - t0) * 1e3)
+        inf_ms.append((t3 - t2) * 1e3)
+        post_ms.append((t4 - t3) * 1e3)
+
+    return {"pre": pre_ms, "inf": inf_ms, "post": post_ms}
+
+
+def summarize(inf: list[float], batch: int) -> dict:
+    per_img = [v / batch for v in inf]
+    return {
+        "mean_ms": statistics.mean(per_img),
+        "std_ms": statistics.pstdev(per_img),
+        "p50_ms": pct(per_img, 50),
+        "p90_ms": pct(per_img, 90),
+        "p99_ms": pct(per_img, 99),
+        "min_ms": min(per_img),
+        "max_ms": max(per_img),
+        "fps": 1000.0 / statistics.mean(per_img),
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--images", required=True)
+    ap.add_argument("--runtime", required=True, choices=["pytorch", "onnx", "tensorrt"])
+    ap.add_argument("--model", default="yolov8n.pt")
+    ap.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    ap.add_argument("--half", action="store_true", help="PyTorch FP16")
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--limit", type=int, default=500)
+    ap.add_argument("--warmup", type=int, default=50)
+    ap.add_argument("--iters", type=int, default=300)
+    ap.add_argument("--repeats", type=int, default=3, help="จำนวนรอบ รายงาน mean±std ระหว่างรอบ")
+    ap.add_argument("--no-postprocess", action="store_true")
+    ap.add_argument("--tag", default="", help="ป้ายกำกับเพิ่มในผลลัพธ์")
+    ap.add_argument("--out", default="results.jsonl")
+    args = ap.parse_args()
+
+    imgs = load_images(args.images, args.limit)
+
+    if args.runtime == "pytorch":
+        runner = PyTorchRunner(args.model, args.device, args.half)
+        device_label = "GPU" if args.device == "cuda" else "CPU"
+    elif args.runtime == "onnx":
+        runner = ONNXRunner(args.model, args.device)
+        device_label = "GPU" if args.device == "cuda" else "CPU"
+        print(f"[onnx] providers ที่ใช้จริง: {runner.providers}")
+    else:
+        runner = TensorRTRunner(args.model, args.batch)
+        device_label = "GPU"
+
+    state_before = gpu_state()
+    print(f"[gpu] ก่อนวัด: {state_before}")
+    print(f"[run] {runner.name} {runner.precision} {device_label} "
+          f"batch={args.batch} warmup={args.warmup} iters={args.iters} "
+          f"repeats={args.repeats}")
+
+    rounds = []
+    for r in range(args.repeats):
+        t = time.perf_counter()
+        res = run_once(runner, imgs, args.batch, args.warmup, args.iters,
+                       not args.no_postprocess)
+        s = summarize(res["inf"], args.batch)
+        s["pre_mean_ms"] = statistics.mean(res["pre"]) / args.batch
+        s["post_mean_ms"] = statistics.mean(res["post"]) / args.batch
+        s["e2e_mean_ms"] = s["mean_ms"] + s["pre_mean_ms"] + s["post_mean_ms"]
+        s["gpu"] = gpu_state()
+        rounds.append(s)
+        print(f"  รอบ {r+1}/{args.repeats}: p50 {s['p50_ms']:.3f}ms  "
+              f"p99 {s['p99_ms']:.3f}ms  {s['fps']:.1f} FPS  "
+              f"e2e {s['e2e_mean_ms']:.3f}ms  "
+              f"({time.perf_counter()-t:.1f}s, GPU {s['gpu'].get('temp_c','?')}°C)")
+
+    state_after = gpu_state()
+    means = [r["mean_ms"] for r in rounds]
+    p99s = [r["p99_ms"] for r in rounds]
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "runtime": runner.name,
+        "precision": runner.precision,
+        "device": device_label,
+        "model": args.model,
+        "batch": args.batch,
+        "tag": args.tag,
+        "config": {"warmup": args.warmup, "iters": args.iters,
+                   "repeats": args.repeats, "num_images": len(imgs),
+                   "postprocess_included": not args.no_postprocess},
+        "latency_ms_per_image": {
+            "mean": statistics.mean(means),
+            "std_across_repeats": statistics.pstdev(means) if len(means) > 1 else 0.0,
+            "p50": statistics.mean([r["p50_ms"] for r in rounds]),
+            "p99": statistics.mean(p99s),
+            "p99_std_across_repeats": statistics.pstdev(p99s) if len(p99s) > 1 else 0.0,
+        },
+        "fps": statistics.mean([r["fps"] for r in rounds]),
+        "throughput_img_per_s": statistics.mean([r["fps"] for r in rounds]),
+        "preprocess_ms": statistics.mean([r["pre_mean_ms"] for r in rounds]),
+        "postprocess_ms": statistics.mean([r["post_mean_ms"] for r in rounds]),
+        "end_to_end_ms": statistics.mean([r["e2e_mean_ms"] for r in rounds]),
+        "model_size_mb": runner.model_size_mb(args.model),
+        "peak_vram_mb": runner.peak_vram_mb(),
+        "gpu_before": state_before,
+        "gpu_after": state_after,
+        "rounds": rounds,
+    }
+    if args.runtime == "onnx":
+        record["providers"] = runner.providers
+
+    with open(args.out, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    L = record["latency_ms_per_image"]
+    print(f"\n{'-'*60}")
+    print(f"  {runner.name} / {runner.precision} / {device_label} / batch {args.batch}")
+    print(f"  inference-only : p50 {L['p50']:.3f} ms | p99 {L['p99']:.3f} ms")
+    print(f"                   mean {L['mean']:.3f} ± {L['std_across_repeats']:.3f} ms")
+    print(f"  end-to-end     : {record['end_to_end_ms']:.3f} ms "
+          f"(pre {record['preprocess_ms']:.3f} / post {record['postprocess_ms']:.3f})")
+    print(f"  throughput     : {record['fps']:.1f} img/s")
+    print(f"  model size     : {record['model_size_mb']:.2f} MB")
+    if state_before.get("temp_c") and state_after.get("temp_c"):
+        d = state_after["temp_c"] - state_before["temp_c"]
+        print(f"  GPU temp       : {state_before['temp_c']:.0f} -> "
+              f"{state_after['temp_c']:.0f} °C ({d:+.0f})")
+        if d > 15:
+            print("  [warn] อุณหภูมิขึ้นเยอะ — อาจมี throttle ระหว่างวัด "
+                  "ลองรันให้ร้อนคงที่ก่อน หรือ nvidia-smi -lgc")
+    print(f"  -> ต่อท้ายลง {args.out}\n{'-'*60}")
+
+    if hasattr(runner, "close"):
+        runner.close()
+
+
+if __name__ == "__main__":
+    main()

@@ -6,6 +6,8 @@ from pathlib import Path
 
 
 def load_jsonl(p: str) -> list[dict]:
+    # คืน [] แทนที่จะพังถ้าไฟล์ยังไม่มี — accuracy.jsonl มักยังไม่เกิดตอนรัน
+    # benchmark เสร็จใหม่ๆ ควรได้ตารางเวลาออกมาก่อนโดยที่คอลัมน์ mAP ว่างไว้
     path = Path(p)
     if not path.exists():
         return []
@@ -13,6 +15,9 @@ def load_jsonl(p: str) -> list[dict]:
 
 
 def key_of(r: dict) -> tuple:
+    # join key ระหว่าง results.jsonl กับ accuracy.jsonl — ไม่รวม batch โดยตั้งใจ
+    # เพราะ mAP ไม่ขึ้นกับ batch size แถว b1 กับ b8 จึงใช้ค่า accuracy ตัวเดียวกันได้
+    # (ต้องสะกดตรงกับที่ benchmark.py และ evaluate.py เขียนลงไฟล์ ดู evaluate.py:record)
     return (r.get("runtime"), r.get("precision"), r.get("device"))
 
 
@@ -34,6 +39,9 @@ def main():
     if not results:
         raise SystemExit(f"ไม่มีข้อมูลใน {args.results} — รัน benchmark.py ก่อน")
 
+    # NOTE: ทั้งสองไฟล์เป็น append-only รัน config เดิมซ้ำจะได้แถวซ้ำในตาราง
+    # และ acc_map จะเก็บอันหลังสุดเงียบๆ (dict comprehension ทับของเดิม)
+    # ถ้าจะวัดใหม่ทั้งชุดให้ลบไฟล์ทิ้งก่อน
     acc_map = {key_of(a): a for a in accs}
     outdir = Path(args.outdir)
 
@@ -43,12 +51,18 @@ def main():
     sep = "|" + "---|" * 12
     lines = [hdr, sep]
 
+    # TODO: เลือกแถวแรกที่เป็น PyTorch/GPU/batch 1 โดยไม่ได้เช็ก precision
+    # แต่หัวตารางข้างล่างเขียนตายตัวว่า "เทียบ PyTorch GPU FP32"
+    # ถ้ารัน --half ก่อนแล้วบรรทัดนั้นมาก่อนใน jsonl ตัวเลข speedup ทุกแถว
+    # จะเทียบกับ FP16 ใต้ป้ายที่บอกว่า FP32 — ต้องเพิ่มเงื่อนไข precision == "FP32"
     baseline_fps = None
     for r in results:
         if r["runtime"] == "PyTorch" and r["device"] == "GPU" and r.get("batch", 1) == 1:
             baseline_fps = r["fps"]
             break
 
+    # เรียงช้าไปเร็ว เพื่อให้อ่านตารางจากบนลงล่างแล้วเห็นเรื่องราวของการ optimize
+    # (PyTorch -> ONNX -> TRT FP16 -> TRT INT8) แทนที่จะต้องไล่หาเอง
     for r in sorted(results, key=lambda x: -x["latency_ms_per_image"]["p50"]):
         L = r["latency_ms_per_image"]
         a = acc_map.get(key_of(r))
@@ -63,8 +77,14 @@ def main():
             f"{L['mean']:.2f} ± {L['std_across_repeats']:.2f}",
             f"{r['fps']:.1f}",
             f"{r['end_to_end_ms']:.2f}",
+            # "—" ไม่ได้แปลว่า mAP เป็นศูนย์ แปลว่ายังไม่ได้รัน evaluate.py สำหรับ
+            # config นี้ หรือ key_of() ไม่ตรงกันระหว่างสองไฟล์
             f"{a['mAP50_95']:.4f}" if a else "—",
             f"{r['model_size_mb']:.1f}",
+            # NOTE: คอลัมน์นี้เทียบข้ามแถวไม่ได้ — PyTorch รายงานเฉพาะ tensor,
+            # TensorRT รายงานทั้งการ์ดจาก nvidia-smi, ONNX ไม่รายงานเลย
+            # ดูเหตุผลเต็มที่ benchmark.py TensorRTRunner.peak_vram_mb
+            # ต้องเขียนกำกับใน Limitations ไม่งั้นคนอ่านจะเทียบตัวเลขกันตรงๆ
             f"{vram:.0f}" if vram else "—",
         ]
         lines.append("| " + " | ".join(cells) + " |")
@@ -83,8 +103,12 @@ def main():
     print(f"\n-> {outdir/'report_table.md'}")
 
     # ---------------- กราฟ ----------------
+    # import ในนี้เพราะ matplotlib เป็น optional — ตารางคือผลลัพธ์หลัก
+    # กราฟเป็นของแถม ไม่ควรทำให้ทั้งสคริปต์พังถ้าไม่มี
     try:
         import matplotlib
+        # ต้องเรียกก่อน import pyplot — เครื่องที่วัด benchmark มักไม่มี display
+        # ถ้าไม่ตั้ง Agg pyplot จะพยายามหา GUI backend แล้วพังตอน import
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import numpy as np
@@ -100,7 +124,12 @@ def main():
 
     x = np.arange(len(rs))
     w = 0.38
+    # วาด p50 คู่ p99 เสมอ ไม่ใช่ mean อย่างเดียว — ระยะห่างระหว่างสองแท่งคือ
+    # tail latency ซึ่งเป็นตัวที่สำคัญจริงตอน deploy มากกว่าค่าเฉลี่ย
     fig, ax = plt.subplots(figsize=(max(8, len(rs) * 1.5), 5))
+    # TODO: err คือ std ของ mean ระหว่างรอบ แต่เอามาวางเป็น error bar ของแท่ง p50
+    # ซึ่งเป็นคนละสถิติกัน ควรใช้ std ของ p50 ระหว่างรอบ (ยังไม่ได้เก็บลง jsonl —
+    # ตอนนี้ benchmark.py เก็บแค่ p99_std_across_repeats)
     ax.bar(x - w / 2, p50, w, yerr=err, capsize=3, label="p50", color="#4C78A8")
     ax.bar(x + w / 2, p99, w, label="p99", color="#F58518")
     ax.set_xticks(x)
@@ -115,6 +144,8 @@ def main():
     fig.savefig(outdir / "fig_latency.png", dpi=150)
     print(f"-> {outdir/'fig_latency.png'}")
 
+    # กราฟนี้คือข้อสรุปของทั้งโปรเจกต์: เร็วขึ้นแลกกับ mAP ที่หายไปเท่าไร
+    # ตัวเลขเดี่ยวๆ ในตารางตอบไม่ได้ว่าคุ้มไหม ต้องเห็นทั้งสองแกนพร้อมกัน
     pts = [(r, acc_map[key_of(r)]) for r in results if key_of(r) in acc_map]
     if pts:
         fig, ax = plt.subplots(figsize=(7, 5.5))

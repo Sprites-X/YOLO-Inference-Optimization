@@ -1,13 +1,13 @@
 {
-  "checked_at": "2026-08-23T09:08:02.677387+00:00",
+  "checked_at": "2026-08-23T12:24:55.776160+00:00",
   "checks": {
     "PYTHONPATH ว่าง": {
-      "status": "pass",
-      "detail": "ไม่มีอะไร shadow venv"
+      "status": "warn",
+      "detail": "เจอ 2 รายการ: /opt/ros/humble/lib/python3.10/site-packages ..."
     },
     "nvidia-smi": {
       "status": "pass",
-      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 40 | 145.00 W | 3090 MHz"
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 38 | 145.00 W | 3090 MHz"
     },
     "driver >= 570": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "รัน CUDA kernel จริง": {
       "status": "pass",
-      "detail": "matmul สำเร็จ (checksum 4575.5)"
+      "detail": "matmul สำเร็จ (checksum 15981.8)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -54,8 +54,8 @@
       "detail": "12.9.7 via cuda.bindings.runtime"
     },
     "trtexec ใน PATH": {
-      "status": "warn",
-      "detail": "หาไม่เจอ — ปกติอยู่ที่ /usr/src/tensorrt/bin หรือใน site-packages/tensorrt_libs"
+      "status": "pass",
+      "detail": "&&&& RUNNING TensorRT.trtexec [TensorRT v101601] [b11] # /home/sprites/TensorRT-10.16.1.11/bin/trtexec --help"
     },
     "ultralytics": {
       "status": "pass",
@@ -79,7 +79,7 @@
     },
     "GPU state ตอนนี้": {
       "status": "pass",
-      "detail": "P1, 2632 MHz"
+      "detail": "P1, 2542 MHz"
     },
     "system": {
       "status": "pass",
@@ -101,7 +101,7 @@
     "numpy": "2.2.6",
     "pycocotools": "2.0.11",
     "cpu_governor": "performance",
-    "os": "Linux-6.8.0-136-generic-x86_64-with-glibc2.35",
+    "os": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
     "python": "3.10.12",
     "cpu": "AMD Ryzen 5 7500F 6-Core Processor"
   }

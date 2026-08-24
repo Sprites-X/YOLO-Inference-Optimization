@@ -29,8 +29,8 @@ Full detail in `env_report.json`, exact packages in `requirements.lock.txt`.
   ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels
 - `benchmark.py` — warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs
 - `build_engine.py` — TensorRT 10 builder with a real INT8 calibrator
-- `prepare_data.py` — deterministic val500 / calibration-pool split (seeded,
-  disjoint by construction so Phase 3 calibration cannot leak into the mAP set)
+- `prepare_data.py` — deterministic 500-image measurement set from val2017
+- `fetch_train_pool.py` — pulls the train2017 calibration pool for Phase 3
 
 ## Install
 
@@ -48,33 +48,46 @@ Then run `python verify_env.py` — it must report zero failures.
 
 ## Data
 
+Measurement set — 500 images from val2017:
+
     curl -O http://images.cocodataset.org/zips/val2017.zip
     curl -O http://images.cocodataset.org/annotations/annotations_trainval2017.zip
     unzip val2017.zip -d data/
     unzip -j annotations_trainval2017.zip annotations/instances_val2017.json -d annotations/
     python prepare_data.py --src data/val2017
 
-Splits val2017's 5000 images into `data/val500` (measurement) and
-`data/calib_pool` (4500, held back for Phase 3 INT8 calibration). The two are
-disjoint by construction and the script refuses to write if they ever overlap:
-calibrating on the images used to score mAP would inflate the INT8 result with
-nothing to flag it.
+Calibration pool for Phase 3 — 2000 images from train2017 (~340 MB):
 
-The split is a seeded shuffle (seed 1337), so a clone gets the same 500 images.
-`prepare_data.py` checks this itself and exits non-zero on a mismatch:
+    python fetch_train_pool.py
 
-| set | manifest sha256 |
-|---|---|
-| `val500` | `faabd1586d3313cc6cdac1db9b7a570c4dd0ef980e8fde83cdd31ac8a846e9f7` |
-| `calib_pool` | `aaca64bcf21426cf8c4bc92b614a226042812b541d1880d011443334e366dff0` |
+Calibration images come from train2017 and the measurement set from val2017, so
+they are different COCO splits and cannot overlap. That separation is the point:
+calibrating INT8 on the images used to score mAP tunes the dynamic ranges to the
+test set and reports a number that is too good, with nothing to flag it. Both
+scripts check for overlap anyway.
 
-Two caveats worth stating plainly. The pool is val2017's remainder, not COCO
-train2017 as the guide assumes — calibration needs the same distribution with no
-overlap with the val set, which holds, but it is not the train split. And
-mAP here is over 500 images, so it sits a little above the 0.373 Ultralytics
-reports over all 5000; the point of the number is comparing runtimes on
-identical images, not restating the published figure.
+`fetch_train_pool.py` downloads the images named in `train_pool_manifest.txt`
+one at a time rather than pulling `train2017.zip`, which is ~19 GB against the
+13 GB free on this machine. The guide does not require the full split — Phase 3
+only does `shuf -n 500` over the pool. The manifest is committed (34 KB) so a
+clone gets the same pool without re-deriving it from the 241 MB annotations
+archive; it is the first 2000 of all 118,287 train2017 filenames after a seeded
+shuffle. 2000 rather than 500 leaves room for the guide's suggestion to retry
+with 1000 images if INT8 mAP drops more than 3-4%.
 
-Images are hardlinked, so the split costs no extra disk.
+Both selections are seeded (1337) and self-verifying — each script recomputes
+its manifest hash and exits non-zero on a mismatch, so pointing `--src` at the
+wrong directory fails immediately instead of silently benchmarking other images:
+
+| set | source split | manifest sha256 |
+|---|---|---|
+| `data/val500` | val2017 | `faabd1586d3313cc6cdac1db9b7a570c4dd0ef980e8fde83cdd31ac8a846e9f7` |
+| `data/train_pool` | train2017 | `6c787a8293f8ea2223b451a45e3c10d137716496f5b782c59b38a5428049b7e6` |
+
+val500 images are hardlinked from `data/val2017`, so they cost no extra disk.
+
+One caveat on the mAP column: it is measured over 500 images, so it sits a
+little above the 0.373 Ultralytics reports over all 5000. The number is for
+comparing runtimes on identical images, not for restating the published figure.
 
 Results and analysis to follow.

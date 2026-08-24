@@ -84,7 +84,6 @@ def main():
             # NOTE: คอลัมน์นี้เทียบข้ามแถวไม่ได้ — PyTorch รายงานเฉพาะ tensor,
             # TensorRT รายงานทั้งการ์ดจาก nvidia-smi, ONNX ไม่รายงานเลย
             # ดูเหตุผลเต็มที่ benchmark.py TensorRTRunner.peak_vram_mb
-            # ต้องเขียนกำกับใน Limitations ไม่งั้นคนอ่านจะเทียบตัวเลขกันตรงๆ
             f"{vram:.0f}" if vram else "—",
         ]
         lines.append("| " + " | ".join(cells) + " |")

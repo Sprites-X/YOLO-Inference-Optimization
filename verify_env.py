@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 # ด่านตรวจก่อนเริ่มวัด — เขียนผลลง env_report.json เพื่อแนบไปกับ README
 # ตัวเลข benchmark ไม่มีความหมายถ้าไม่รู้ว่าวัดบนสภาพแวดล้อมไหน
 #
-# ทุกด่านในไฟล์นี้มาจากปัญหาที่เจอจริงตอน Phase 0 ไม่ใช่การเช็กเผื่อไว้
+# ทุกด่านในไฟล์นี้มาจากปัญหาที่เจอจริงตอนติดตั้ง ไม่ใช่การเช็กเผื่อไว้
 # ที่มาของแต่ละด่านเขียนกำกับไว้ตรงตัวมัน
 REPORT = {"checked_at": datetime.now(timezone.utc).isoformat(), "checks": {}, "versions": {}}
 FAILURES: list[str] = []
@@ -19,7 +19,7 @@ WARNINGS: list[str] = []
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
  
  
-# FAIL = ห้ามไป Phase 1 ผลที่วัดได้จะผิด
+# FAIL = ห้ามวัดต่อ ผลที่วัดได้จะผิด
 # WARN = วัดได้ แต่ตัวเลขอาจแกว่งหรือเทียบข้ามเครื่องไม่ได้
 # แยกสองระดับเพราะถ้าทุกอย่างเป็น FAIL หมด คนจะเริ่มข้ามมันไปเลย
 def ok(name, detail=""):
@@ -99,7 +99,7 @@ def check_torch():
     if cap == (12, 0):
         ok("compute capability", "(12, 0) = sm_120 Blackwell")
     else:
-        warn("compute capability", f"{cap} — guideline นี้เขียนสำหรับ (12, 0)")
+        warn("compute capability", f"{cap} — สคริปต์ชุดนี้ตรวจมาสำหรับ (12, 0)")
 
     try:
     # นี่คือด่านที่จับ "torch ลงผิด build" ได้จริง: wheel ที่ build ให้ sm_90 ลงมา
@@ -127,7 +127,7 @@ def check_torch():
         warn("FP16 matmul", str(e).split("\n")[0])
  
  
-# NOTES ปัญหา 1: torch ตัวล่าสุดมากับ cu130 แต่ onnxruntime-gpu release ยังเป็น
+# torch ตัวล่าสุดมากับ cu130 แต่ onnxruntime-gpu release ยังเป็น
 # CUDA 12.x เลยถอย torch ลง cu128 ทั้งสแตก ด่านนี้คือตัวที่จะจับได้ถ้าคนอื่น
 # clone ไปแล้วลง torch ใหม่กว่าทับ — ORT จะตกไป CPU แบบเงียบๆ
 def check_onnxruntime():
@@ -234,8 +234,8 @@ def check_tensorrt():
         fail("cuda-python", "pip install cuda-python — สคริปต์ชุดนี้ใช้ cudart ไม่ใช่ pycuda")
  
     # WARN ไม่ใช่ FAIL เพราะ trtexec ไม่ได้มากับ pip wheel — มีแต่ใน GA tarball
-    # (NOTES ปัญหา 8: โหลดผิดไฟล์ไปรอบหนึ่ง ได้ source repo จาก GitHub ที่ไม่มี bin/)
-    # ใช้เป็น cross-check ตอน Phase 4 เท่านั้น ไม่มีก็ยังวัดได้
+    # (source repo จาก GitHub ไม่มีโฟลเดอร์ bin/ ดาวน์โหลดผิดไฟล์แล้วจะไม่เจอ trtexec)
+    # ใช้เป็น cross-check เท่านั้น ไม่มีก็ยังวัดได้
     #
     # ตอนนี้เจอแล้วที่ /home/sprites/TensorRT-10.16.1.11/bin/trtexec รายงาน v101601
     # ตรงกับ tensorrt-cu12 ที่ลงผ่าน pip เป๊ะ (10.16.1.11) — สำคัญเพราะ engine
@@ -298,10 +298,10 @@ def check_misc():
  
  
 def main():
-    print(f"\n{'='*68}\n  Phase 0 — Environment Verification\n{'='*68}")
+    print(f"\n{'='*68}\n  Environment Verification\n{'='*68}")
  
-    # NOTES ปัญหา 2 + 6: เหยียบเรื่อง venv สองรอบในวันเดียว รอบแรกลงของไปที่
-    # ~/.local โดยไม่รู้ตัว รอบสองรัน verify script จาก terminal ที่ไม่ได้ activate
+    # เคยพลาดเรื่อง venv สองแบบ: ลงของไปที่ ~/.local โดยไม่รู้ตัว และรัน
+    # verify script จาก terminal ที่ไม่ได้ activate
     # แล้วเวอร์ชันดูเหมือนถอยหลัง (ultralytics 8.4.126 -> 8.4.104, cv2 5.0.0 -> 4.13.0,
     # numpy 2.2.6 -> 1.26.4) โดยไม่มีอะไรบอกว่าผิด
     # เลยใส่ guard ในโค้ดแทนที่จะพึ่งความจำ — ด่านนี้ต้องอยู่ก่อนทุกด่าน
@@ -311,7 +311,7 @@ def main():
         return 1
     print(f"  {DIM}venv: {sys.prefix}{RESET}")
  
-    # NOTES ปัญหา 9: ROS 2 setup.bash เซ็ต PYTHONPATH ซึ่ง venv ไม่ตัดให้
+    # ROS 2 setup.bash เซ็ต PYTHONPATH ซึ่ง venv ไม่ตัดให้
     # ทำให้ pip freeze ปนแพ็กเกจ ROS ราว 150 ตัวเข้ามาใน lock file
     # "อยู่ใน venv" ไม่ได้แปลว่า isolated จริง
     #
@@ -334,18 +334,18 @@ def main():
     check_misc()
  
     # TODO: ยังไม่มีด่านที่จับ nvidia-* wheel ที่ปน cu12 กับ cu13 ใน venv เดียวกัน
-    # ซึ่งเป็นอาการของ NOTES ปัญหา 1 — ตอนนี้จับได้ทางอ้อมผ่าน ORT smoke test เท่านั้น
+    # ซึ่งเป็นอาการของ cu12 ปนกับ cu13 — ตอนนี้จับได้ทางอ้อมผ่าน ORT smoke test เท่านั้น
     # ถ้าเพิ่ม: วน importlib.metadata หาแพ็กเกจขึ้นต้น nvidia- แล้วดูว่า suffix cu ตรงกันหมด
     with open("env_report.json", "w") as f:
         json.dump(REPORT, f, indent=2, ensure_ascii=False)
  
     print(f"\n{'='*68}")
     if FAILURES:
-        print(f"{RED}  {len(FAILURES)} FAIL{RESET} — อย่าเพิ่งไป Phase 1")
+        print(f"{RED}  {len(FAILURES)} FAIL{RESET} — แก้ให้ผ่านก่อนเริ่มวัด")
         for f_ in FAILURES:
             print(f"    - {f_}")
     else:
-        print(f"{GREEN}  ผ่านทุกข้อ{RESET} — เริ่ม Phase 1 ได้")
+        print(f"{GREEN}  ผ่านทุกข้อ{RESET} — เริ่มวัดได้")
     if WARNINGS:
         print(f"{YELLOW}  {len(WARNINGS)} WARN{RESET} — วัดได้ แต่ตัวเลขอาจแกว่ง")
     print(f"  บันทึกลง env_report.json (แนบใน README)\n{'='*68}\n")

@@ -106,7 +106,7 @@ class PyTorchRunner:
 class ONNXRunner:
     name = "ONNX Runtime"
     # ฮาร์ดโค้ดไว้เพราะตอนนี้ export เป็น FP32 อย่างเดียว
-    # TODO: ถ้าเพิ่มแถว ONNX FP16 ตอน Phase 4 ต้องอ่าน dtype จาก graph จริง
+    # TODO: ถ้าเพิ่มแถว ONNX FP16 ต้องอ่าน dtype จาก graph จริง
     # ไม่งั้นตารางจะติดป้าย FP32 ให้ผลที่วัดจากโมเดล FP16
     precision = "FP32"
 
@@ -121,7 +121,7 @@ class ONNXRunner:
         self.sess = ort.InferenceSession(model_path, opts, providers=providers)
         used = self.sess.get_providers()
 
-        # ด่านนี้คือเหตุผลหลักที่ verify_env.py มีอยู่ (NOTES ปัญหา 1)
+        # ด่านนี้คือเหตุผลหลักที่ verify_env.py มีอยู่
         # ORT ไม่ถือว่าการตกไป CPU เป็น error — มันแค่เงียบแล้วรันช้าลง 20-50 เท่า
         # ถ้าปล่อยผ่าน แถว "ONNX Runtime GPU" จะเป็นตัวเลข CPU ที่ติดป้าย GPU
         # ซึ่งเป็นความผิดพลาดชนิดที่มองไม่ออกจากตาราง ต้อง raise ตรงนี้เท่านั้น
@@ -286,7 +286,7 @@ class TensorRTRunner:
         # ส่วน PyTorch รายงาน max_memory_allocated() = เฉพาะ tensor ไม่รวม context
         # และ ONNX คืน None ไปเลย ทั้งสามอย่างอยู่คอลัมน์ VRAM เดียวกันในตาราง
         # TODO: ถ้าจะให้คอลัมน์นี้มีความหมาย ต้องวัดฐาน (mem_used ตอนยังไม่โหลดอะไร)
-        # แล้วลบออกให้ทุก runtime เหมือนกัน หรือไม่ก็ตัดคอลัมน์ทิ้งแล้วเขียนใน Limitations
+        # แล้วลบออกให้ทุก runtime เหมือนกัน หรือไม่ก็ตัดคอลัมน์นี้ทิ้ง
         cur = gpu_state().get("mem_used_mb")
         return cur if cur is not None else None
 
@@ -495,7 +495,7 @@ def main():
     print(f"  model size     : {record['model_size_mb']:.2f} MB")
     # 15°C เป็นเกณฑ์ที่ตั้งเอา ยังไม่ได้ยืนยันว่าตรงกับจุดที่การ์ดใบนี้เริ่ม throttle จริง
     # NOTES: GPU idle อยู่ที่ 37-40°C ยังไม่ได้วัดตอนโหลดเต็ม
-    # TODO: หลังรัน Phase 2 ครบ เอา gpu_before/gpu_after จริงมาปรับเกณฑ์นี้
+    # TODO: เอา gpu_before/gpu_after จากการรันจริงมาปรับเกณฑ์นี้
     if state_before.get("temp_c") and state_after.get("temp_c"):
         d = state_after["temp_c"] - state_before["temp_c"]
         print(f"  GPU temp       : {state_before['temp_c']:.0f} -> "

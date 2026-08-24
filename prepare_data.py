@@ -4,7 +4,7 @@
     data/val500/  500 ภาพ -> วัด latency (benchmark.py) และ mAP (evaluate.py)
 
 ภาพสำหรับ INT8 calibration ไม่ได้มาจากที่นี่ — อยู่ใน data/train_pool/ ซึ่งดึงมาจาก
-COCO train2017 ด้วย fetch_train_pool.py ตามที่ guide กำหนด แยกคนละ split กันเพื่อไม่ให้
+COCO train2017 ด้วย fetch_train_pool.py แยกคนละ split กันเพื่อไม่ให้
 calibrate ด้วยภาพที่กำลังจะเอาไปให้คะแนน (INT8 จะถูกจูน dynamic range ให้พอดีกับข้อสอบ
 แล้ว mAP ออกมาดีเกินจริงโดยไม่มีอะไรฟ้อง)
 """

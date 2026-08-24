@@ -169,8 +169,6 @@ def main():
     print(f"  small {record['mAP_small']:.3f} / medium {record['mAP_medium']:.3f} "
           f"/ large {record['mAP_large']:.3f}")
     print(f"  -> ต่อท้ายลง {args.out}")
-    print("\n  [note] วัตถุเล็ก (mAP_small) มักตกหนักสุดตอน INT8 — "
-          "ถ้า small ตกเยอะกว่า large ชัดเจน เขียนอธิบายตรงนี้ใน Analysis")
 
     if hasattr(runner, "close"):
         runner.close()

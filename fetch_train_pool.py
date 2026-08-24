@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""ดึงภาพ COCO train2017 มาเป็นบ่อสำหรับ INT8 calibration (Phase 3)
+"""ดึงภาพ COCO train2017 มาเป็นบ่อสำหรับ INT8 calibration
 
-    data/train_pool/  2000 ภาพจาก train2017 -> Phase 3 สุ่มออกมา 500 ภาพไปใช้จริง
+    data/train_pool/  2000 ภาพจาก train2017 -> สุ่มออกมา 500 ภาพไปใช้ calibrate
 
 **ทำไมไม่โหลด train2017.zip ทั้งก้อน** — train2017 คือ 118,287 ภาพ / ~19GB ส่วนเครื่อง
 ที่ทำโปรเจกต์นี้เหลือดิสก์ 13GB จึงดึงเฉพาะภาพที่อยู่ใน train_pool_manifest.txt
-ทีละไฟล์จาก images.cocodataset.org แทน (~330MB) guide ไม่ได้บังคับว่า train_pool
-ต้องเป็น train2017 ครบชุด — Phase 3 ใช้แค่ `shuf -n 500` จากบ่อนี้อยู่แล้ว
+ทีละไฟล์จาก images.cocodataset.org แทน (~330MB) calibration ใช้ภาพหลักร้อย ไม่ใช่
+ทั้ง split อยู่แล้ว บ่อขนาดนี้จึงพอ
 
 **ทำไมรายชื่ออยู่ในไฟล์ manifest ไม่ใช่สุ่มตอนรัน** — ถ้าสุ่มตอนรัน แต่ละเครื่องจะได้
 คนละบ่อ แล้ว calibration cache เทียบกันข้ามเครื่องไม่ได้ manifest ถูก commit ขึ้น repo
 (34KB) คนที่ clone จึงได้บ่อเดียวกันโดยไม่ต้องโหลด annotations 241MB มา generate เอง
 
 รายชื่อใน manifest มาจาก: เรียงชื่อไฟล์ทั้ง 118,287 ภาพของ train2017 แล้ว
-random.Random(1337).shuffle() แล้วตัด 2000 ตัวแรก (2000 ไม่ใช่ 500 เพราะ guide บอกว่า
-ถ้า mAP ตกเกิน 3-4% ให้ลองเพิ่มภาพ calibration เป็น 1000 — เผื่อไว้ให้ลองได้)
+random.Random(1337).shuffle() แล้วตัด 2000 ตัวแรก (2000 ไม่ใช่ 500 เพราะถ้า INT8 ทำ
+mAP ตกมาก ทางแก้อย่างหนึ่งคือเพิ่มภาพ calibration เป็น 1000 — เผื่อไว้ให้ลองได้)
 
 **ภาพชุดนี้ต้องไม่ทับกับ data/val500** — val500 มาจาก val2017 ส่วนบ่อนี้มาจาก train2017
 เป็นคนละ split ของ COCO จึงไม่ทับกันโดยนิยาม (สคริปต์ยังตรวจซ้ำตอนจบ)
@@ -122,11 +122,11 @@ def main():
         overlap = {p.name for p in val500.iterdir()} & set(have)
         if overlap:
             raise SystemExit(f"[pool] ทับกับ val500 {len(overlap)} ภาพ — leakage")
-        print("[pool] ไม่ทับกับ data/val500 — Phase 3 calibrate ได้โดยไม่ leak")
+        print("[pool] ไม่ทับกับ data/val500 — calibrate ได้โดยไม่ leak")
 
     size_mb = sum(p.stat().st_size for p in dest.iterdir()) / 1024 / 1024
     print(f"[pool] {dest}: {len(have)} ภาพ ({size_mb:.0f} MB)")
-    print(f"[pool] Phase 3: ls {dest}/*.jpg | shuf -n 500 | xargs -I{{}} cp {{}} data/calib/")
+    print(f"[pool] สุ่มไปทำ calib: ls {dest}/*.jpg | shuf -n 500 | xargs -I{{}} cp {{}} data/calib/")
 
 
 if __name__ == "__main__":

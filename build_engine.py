@@ -74,7 +74,7 @@ def _check_calib_cache(cache_path: str, fingerprint: str, describe: str) -> None
 # IInt8EntropyCalibrator2 ถูก deprecate ตั้งแต่ TRT 10 แล้ว (ทางใหม่คือ explicit
 # quantization ด้วย Q/DQ node ใน ONNX) แต่ยังใช้ตัวนี้เพราะเป็น post-training
 # calibration ที่ไม่ต้องแก้ ONNX — และเป็นเหตุผลหนึ่งที่ requirements pin
-# tensorrt-cu12==10.16.1.11 ไว้ (NOTES ปัญหา 4: pip ไล่ไปเจอ TRT 11 ซึ่งอาจถอด API นี้แล้ว)
+# tensorrt-cu12==10.16.1.11 ไว้ (ถ้าปล่อยให้ pip ไล่ไป TRT 11 อาจถอด API นี้ไปแล้ว)
 #
 # เลือก Entropy2 ไม่ใช่ MinMax เพราะ Entropy2 เป็นค่าแนะนำสำหรับ CNN
 # MinMax ไวต่อ outlier ในภาพ calibration มากกว่า
@@ -319,7 +319,7 @@ def _force_fp16_output_layers(network, config, n: int = 10):
     # OBEY_PRECISION_CONSTRAINTS ทำให้ build "ล้มเหลว" ถ้าทำตามที่สั่งไม่ได้
     # ซึ่งดีกว่าปล่อยให้ TRT เงียบๆ เลือก precision อื่นแล้วเราเข้าใจผิดว่าบังคับสำเร็จ
     #
-    # TODO: ยังไม่เคยรันจริง (ยังไม่ถึง Phase 3) สองอย่างที่ต้องเช็กตอนใช้ครั้งแรก
+    # TODO: ยังไม่เคยรันจริง สองอย่างที่ต้องเช็กตอนใช้ครั้งแรก
     #   1. set_output_type(float16) ที่ layer สุดท้ายอาจทำให้ engine คาย output เป็น
     #      FP16 → common.postprocess จะ de-letterbox ด้วย float16 แล้วกล่องคลาด ~1 px
     #      (ดู NOTE ท้าย common.postprocess) ถ้าเป็นแบบนั้นต้อง cast ก่อน postprocess
@@ -351,9 +351,9 @@ def main():
     ap.add_argument("--min-batch", type=int, default=1)
     ap.add_argument("--opt-batch", type=int, default=1)
     ap.add_argument("--max-batch", type=int, default=1)
-    # TODO: calib set ต้องไม่ทับกับ eval set ไม่งั้น INT8 mAP จะดูดีเกินจริง
-    # เพราะ calibrate ด้วยภาพเดียวกับที่ใช้วัด — ยังไม่ได้แบ่ง ดู open items ใน NOTES.md
-    # (แผนคือ commit eval_list.txt / calib_list.txt แล้วให้สคริปต์อ่านจากไฟล์)
+    # calib set ต้องไม่ทับกับ eval set ไม่งั้น INT8 mAP จะดูดีเกินจริงเพราะ calibrate
+    # ด้วยภาพเดียวกับที่ใช้วัด — แยกด้วย split คนละชุดของ COCO แล้ว: calib มาจาก
+    # data/train_pool (train2017) ส่วน eval มาจาก data/val500 (val2017)
     ap.add_argument("--calib-dir", default=None)
     # default เป็น None แล้วไปตั้งชื่อจากลายนิ้วมือใน build() — ชื่อกลางๆ แบบเดิม
     # ("calibration.cache") ทำให้โมเดลคนละตัวใช้ dynamic range ทับกันโดยไม่มีอะไรฟ้อง

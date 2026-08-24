@@ -237,17 +237,21 @@ def check_tensorrt():
     # (source repo จาก GitHub ไม่มีโฟลเดอร์ bin/ ดาวน์โหลดผิดไฟล์แล้วจะไม่เจอ trtexec)
     # ใช้เป็น cross-check เท่านั้น ไม่มีก็ยังวัดได้
     #
-    # ตอนนี้เจอแล้วที่ /home/sprites/TensorRT-10.16.1.11/bin/trtexec รายงาน v101601
-    # ตรงกับ tensorrt-cu12 ที่ลงผ่าน pip เป๊ะ (10.16.1.11) — สำคัญเพราะ engine
-    # ผูกกับเวอร์ชัน TRT ถ้าเลขไม่ตรง trtexec จะโหลด engine ที่ build จากสคริปต์นี้ไม่ได้
+    # ที่ตรวจแล้ว: trtexec รายงาน v101601 ตรงกับ tensorrt-cu12 ที่ลงผ่าน pip เป๊ะ
+    # (10.16.1.11) — สำคัญเพราะ engine ผูกกับเวอร์ชัน TRT ถ้าเลขไม่ตรง trtexec
+    # จะโหลด engine ที่ build จากสคริปต์นี้ไม่ได้
     #
-    # เส้นทางนี้อยู่นอก repo และไม่ได้อยู่ใน PATH ถาวร — ถ้าจะใส่ ใส่แค่ $TRT_ROOT/bin
+    # GA tarball อยู่นอก repo และไม่ได้อยู่ใน PATH ถาวร — ถ้าจะใส่ ใส่แค่ $TRT_ROOT/bin
     # อย่าแตะ LD_LIBRARY_PATH เพราะจะไปบัง .so ของ pip ที่ import tensorrt ใช้อยู่
     # (ตอนนี้ทำงานดีอยู่แล้ว อย่าไปยุ่ง)
     #
     # ใช้ --help ไม่ใช่ --version เพราะ trtexec ไม่มีแฟล็ก --version
     if sh("which trtexec"):
-        ok("trtexec ใน PATH", sh("trtexec --help 2>&1 | head -1") or "")
+        # ตัดตั้งแต่ " #" เป็นต้นไปทิ้ง เพราะ trtexec สะท้อน path เต็มของตัวเอง
+        # กลับมาในบรรทัดแรก ซึ่งผูกกับ home ของเครื่องที่รัน แล้วจะติดไปกับ
+        # env_report.json ที่ commit ขึ้น repo — เอาเฉพาะเลขเวอร์ชันก็พอ
+        ok("trtexec ใน PATH",
+           sh("trtexec --help 2>&1 | head -1 | sed 's/ #.*//'") or "")
     else:
         warn("trtexec ใน PATH",
              "หาไม่เจอ — ปกติอยู่ที่ /usr/src/tensorrt/bin หรือใน site-packages/tensorrt_libs")

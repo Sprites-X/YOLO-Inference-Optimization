@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-24T02:13:59.587423+00:00",
+  "checked_at": "2026-08-24T03:12:20.427510+00:00",
   "checks": {
     "PYTHONPATH ว่าง": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "รัน CUDA kernel จริง": {
       "status": "pass",
-      "detail": "matmul สำเร็จ (checksum -12049.4)"
+      "detail": "matmul สำเร็จ (checksum -716.9)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -55,7 +55,7 @@
     },
     "trtexec ใน PATH": {
       "status": "pass",
-      "detail": "&&&& RUNNING TensorRT.trtexec [TensorRT v101601] [b11] # /home/sprites/TensorRT-10.16.1.11/bin/trtexec --help"
+      "detail": "&&&& RUNNING TensorRT.trtexec [TensorRT v101601] [b11]"
     },
     "ultralytics": {
       "status": "pass",
@@ -79,7 +79,7 @@
     },
     "GPU state ตอนนี้": {
       "status": "pass",
-      "detail": "P1, 2557 MHz"
+      "detail": "P1, 2550 MHz"
     },
     "system": {
       "status": "pass",

@@ -15,8 +15,6 @@ datasets/
 annotations/
 
 # Measurement output
-results.jsonl
-accuracy.jsonl
 *.png
 !fig_*.png
 report_table.md

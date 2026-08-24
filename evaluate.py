@@ -16,15 +16,16 @@ IMG_EXT = {".jpg", ".jpeg", ".png"}
 
 
 def image_id_from_name(p: Path) -> int:
-    """COCO val2017 ตั้งชื่อไฟล์เป็น 000000xxxxxx.jpg -> image_id คือเลขนั้น
+    """COCO val2017 names files 000000xxxxxx.jpg -> the image_id is that number.
 
-    เลขนี้ต้องตรงกับ image_id ใน instances_val2017.json เป๊ะ ถ้าไม่ตรง COCOeval
-    จะไม่จับคู่ detection กับ ground truth เลย แล้วคืน mAP 0.000 โดยไม่มี error
+    It has to match the image_id in instances_val2017.json exactly. If it does not,
+    COCOeval pairs no detections with ground truth at all and returns mAP 0.000
+    without raising anything.
     """
     try:
         return int(p.stem.lstrip("0") or "0")
     except ValueError:
-        raise SystemExit(f"ชื่อไฟล์ไม่ใช่รูปแบบ COCO: {p.name}")
+        raise SystemExit(f"filename is not in COCO format: {p.name}")
 
 
 def main():
@@ -37,21 +38,23 @@ def main():
     ap.add_argument("--half", action="store_true")
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--per-class", action="store_true",
-                    help="พิมพ์ AP รายคลาส — ใช้ตอบว่า INT8 ทำคลาสไหนพัง")
+                    help="print per-class AP — shows which classes INT8 breaks")
     ap.add_argument("--out", default="accuracy.jsonl")
     args = ap.parse_args()
 
-    # import ตรงนี้ไม่ใช่ข้างบน เพราะ pycocotools เป็น optional dependency
-    # (verify_env.py ให้ WARN ไม่ใช่ FAIL) — benchmark.py ยังรันได้โดยไม่มีมัน
+    # Imported here rather than at the top because pycocotools is an optional
+    # dependency (verify_env.py warns rather than fails) — benchmark.py runs fine
+    # without it.
     from pycocotools.coco import COCO
     from pycocotools.cocoeval import COCOeval
 
-    # sorted() ไม่ใช่แค่ความเป็นระเบียบ — --limit ตัดจากหัว ถ้าลำดับไม่คงที่
-    # ชุดภาพที่ใช้วัดจะเปลี่ยนไปทุกครั้ง แล้ว mAP ของแต่ละ runtime เทียบกันไม่ได้
+    # sorted() is not just tidiness — --limit slices from the front, so an unstable
+    # order would change which images get measured on every run, and the runtimes'
+    # mAP numbers would stop being comparable.
     files = sorted(p for p in Path(args.images).rglob("*")
                    if p.suffix.lower() in IMG_EXT)[:args.limit]
     if not files:
-        raise SystemExit(f"ไม่เจอรูปใน {args.images}")
+        raise SystemExit(f"no images found in {args.images}")
 
     if args.runtime == "pytorch":
         runner = PyTorchRunner(args.model, args.device, args.half)
@@ -60,13 +63,14 @@ def main():
         runner = ONNXRunner(args.model, args.device)
         device_label = "GPU" if args.device == "cuda" else "CPU"
     else:
-        # batch=1 เสมอ: mAP ไม่ขึ้นกับ batch size อยู่แล้ว และ batch 1 ทำให้จับคู่
-        # ผลกับ image_id ตรงไปตรงมา ไม่ต้องตามว่าภาพไหนอยู่ตำแหน่งไหนในก้อน
+        # Always batch=1: mAP does not depend on batch size anyway, and batch 1 keeps
+        # each result paired with its image_id directly, with no bookkeeping about
+        # which image sat where in the batch.
         runner = TensorRTRunner(args.model, batch=1)
         device_label = "GPU"
 
-    print(f"[eval] {runner.name} {runner.precision} {device_label} บน {len(files)} รูป")
-    print(f"[eval] conf={VAL_CONF} iou={VAL_IOU} max_det={VAL_MAX_DET} (ตรงกับ ultralytics val)")
+    print(f"[eval] {runner.name} {runner.precision} {device_label} on {len(files)} images")
+    print(f"[eval] conf={VAL_CONF} iou={VAL_IOU} max_det={VAL_MAX_DET} (matches ultralytics val)")
 
     detections = []
     for i, p in enumerate(files):
@@ -75,17 +79,19 @@ def main():
             continue
         x, r, pad = preprocess(img)
         raw = runner.infer(x)
-        # sync ก่อนอ่านเสมอ แล้ว np.array() เพื่อ copy ออกมา — TensorRTRunner.infer
-        # คืน host_out buffer ตัวเดิมทุกครั้ง ถ้าไม่ copy ผลจะถูกทับในรอบถัดไป
+        # Always sync before reading, then np.array() to copy it out —
+        # TensorRTRunner.infer hands back the same host_out buffer every call, so
+        # without a copy this result is overwritten on the next iteration.
         runner.sync()
         raw = np.array(raw)
 
-        # ใช้ VAL_* ไม่ใช่ DEPLOY_* — conf 0.001 คือสิ่งที่ COCO AP ต้องการ
-        # (ดูเหตุผลเต็มที่หัวไฟล์ common.py)
+        # VAL_* here, not DEPLOY_* — conf 0.001 is what COCO AP needs
+        # (full reasoning at the top of common.py).
         boxes, scores, cls = postprocess(raw, (r, pad), VAL_CONF, VAL_IOU, VAL_MAX_DET)
 
-        # clip เข้ากรอบภาพเดิม: กล่องที่ทะลุขอบทำให้พื้นที่ในสูตร IoU บวมเกินจริง
-        # แล้ว AP ตกทั้งที่ตำแหน่งถูก — postprocess ไม่ clip ให้เพราะ benchmark ไม่ต้องใช้
+        # Clip back inside the original frame: boxes running past the edge inflate the
+        # area term in IoU, so AP drops even when the position was right. postprocess
+        # does not clip because benchmark has no use for it.
         h, w = img.shape[:2]
         boxes[:, 0::2] = boxes[:, 0::2].clip(0, w)
         boxes[:, 1::2] = boxes[:, 1::2].clip(0, h)
@@ -95,8 +101,9 @@ def main():
             detections.append({
                 "image_id": img_id,
                 "category_id": COCO80_TO_91[int(c)],
-                # COCO ต้องการ [x, y, width, height] ไม่ใช่ xyxy — ส่ง xyxy ไปตรงๆ
-                # จะไม่มี error แต่กล่องจะผิดรูปหมดแล้ว mAP ออกมาเกือบ 0
+                # COCO wants [x, y, width, height], not xyxy. Pass xyxy straight
+                # through and nothing errors, you just get malformed boxes and an
+                # mAP near 0.
                 "bbox": [round(float(b[0]), 2), round(float(b[1]), 2),
                          round(float(b[2] - b[0]), 2), round(float(b[3] - b[1]), 2)],
                 "score": round(float(s), 5),
@@ -106,29 +113,31 @@ def main():
     print()
 
     if not detections:
-        raise SystemExit("ไม่มี detection เลย — เช็ก postprocess หรือ export ก่อน")
+        raise SystemExit("no detections at all — check postprocess or the export first")
 
-    # pycocotools พิมพ์ progress ของมันเองเยอะมาก กลบผลจริง — กลืนเฉพาะช่วง
-    # โหลด/evaluate/accumulate ส่วน summarize() อยู่นอก with เพราะตารางที่มันพิมพ์
-    # คือผลลัพธ์ที่เราต้องการเห็น
+    # pycocotools prints plenty of its own progress and buries the real output, so
+    # swallow just the load/evaluate/accumulate phase. summarize() stays outside the
+    # with block because the table it prints is the result we came for.
     with contextlib.redirect_stdout(io.StringIO()):
         coco_gt = COCO(args.ann)
         coco_dt = coco_gt.loadRes(detections)
         ev = COCOeval(coco_gt, coco_dt, "bbox")
-        # จำกัดให้เหลือเฉพาะภาพที่รันจริง — ถ้าไม่ตั้ง COCOeval จะวัดครบทั้ง 5000 ภาพ
-        # ของ val2017 แล้วนับ 4500 ภาพที่เราไม่ได้รันเป็น miss ทั้งหมด mAP จะเหลือ ~1/10
+        # Restrict to the images actually run. Without this, COCOeval scores all 5000
+        # val2017 images and counts the 4500 we skipped as misses, leaving roughly a
+        # tenth of the real mAP.
         #
-        # NOTE: ภาพที่ cv2.imread คืน None ถูก continue ข้ามไปแล้ว แต่ยังอยู่ในลิสต์นี้
-        # เลยถูกนับเป็น miss จริงๆ — ยังไม่เคยเจอเคสนั้น ถ้าเจอ mAP จะต่ำแบบอธิบายไม่ได้
+        # NOTE: images where cv2.imread returned None were skipped by the continue
+        # above but are still in this list, so they do get counted as real misses.
+        # Never hit that case yet; if it happens, mAP drops for no visible reason.
         ev.params.imgIds = [image_id_from_name(p) for p in files]
         ev.evaluate()
         ev.accumulate()
     ev.summarize()
 
     stats = ev.stats
-    # คีย์ runtime/precision/device ต้องสะกดตรงกับที่ benchmark.py เขียนลง results.jsonl
-    # เพราะ make_report.key_of() ใช้สามตัวนี้เป็น join key ระหว่างสองไฟล์
-    # ถ้าไม่ตรง คอลัมน์ mAP ในตารางจะเป็น "—" ทั้งแถวโดยไม่มีอะไรฟ้อง
+    # runtime/precision/device have to be spelled exactly as benchmark.py writes them
+    # into results.jsonl, because make_report.key_of() joins the two files on those
+    # three. Any mismatch and the mAP column reads "—" for the whole row, silently.
     record = {
         "runtime": runner.name, "precision": runner.precision, "device": device_label,
         "model": args.model, "num_images": len(files), "num_detections": len(detections),
@@ -141,24 +150,25 @@ def main():
     }
 
     if args.per_class:
-        # precision: [T, R, K, A, M] — K คือคลาส, A=0 (all areas), M=2 (maxDet 100)
-        # A=0 เพราะอยากได้ภาพรวมทุกขนาดวัตถุ (ขนาดแยกดูจาก mAP_small/medium/large แล้ว)
-        # M=2 เพราะ params.maxDets = [1, 10, 100] — index 2 คือ 100 ซึ่งเป็นตัวที่
-        # COCO ใช้รายงาน AP มาตรฐาน (ไม่ใช่ 300 ที่เราตั้งไว้ใน NMS — 300 คือเพดาน
-        # ก่อนส่งเข้า eval ส่วน 100 คือจำนวนที่ COCO ยอมนับ)
+        # precision: [T, R, K, A, M] — K is class, A=0 (all areas), M=2 (maxDet 100).
+        # A=0 because we want the picture across all object sizes (per-size numbers
+        # already come from mAP_small/medium/large). M=2 because params.maxDets is
+        # [1, 10, 100] and index 2 is 100, which is what COCO reports standard AP at.
+        # That is not the 300 set in NMS — 300 is the cap before eval, 100 is how many
+        # COCO agrees to count.
         prec = ev.eval["precision"]
         per_class = {}
         cat_ids = coco_gt.getCatIds()
         for k, cid in enumerate(cat_ids):
             pr = prec[:, :, k, 0, 2]
-            # pycocotools ใส่ -1 ให้ช่องที่คลาสนั้นไม่มี GT ในชุดที่ประเมิน
-            # ถ้าเอามาเฉลี่ยด้วยจะได้ AP ติดลบ — ต้องกรองทิ้งก่อน
+            # pycocotools writes -1 where a class has no GT in the evaluated set.
+            # Average those in and the AP comes out negative, so filter them first.
             pr = pr[pr > -1]
             if pr.size:
                 per_class[coco_gt.loadCats(cid)[0]["name"]] = round(float(pr.mean()), 4)
         record["per_class_AP"] = per_class
         worst = sorted(per_class.items(), key=lambda kv: kv[1])[:10]
-        print("\n  คลาสที่ AP ต่ำสุด 10 อันดับ (เทียบข้าม precision เพื่อดูว่า INT8 พังตรงไหน):")
+        print("\n  10 lowest-AP classes (compare across precisions to see where INT8 breaks):")
         for n, v in worst:
             print(f"    {n:<20} {v:.4f}")
 
@@ -168,7 +178,7 @@ def main():
     print(f"\n  mAP50-95 = {record['mAP50_95']:.4f} | mAP50 = {record['mAP50']:.4f}")
     print(f"  small {record['mAP_small']:.3f} / medium {record['mAP_medium']:.3f} "
           f"/ large {record['mAP_large']:.3f}")
-    print(f"  -> ต่อท้ายลง {args.out}")
+    print(f"  -> appended to {args.out}")
 
     if hasattr(runner, "close"):
         runner.close()

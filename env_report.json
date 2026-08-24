@@ -1,13 +1,13 @@
 {
-  "checked_at": "2026-08-24T03:12:20.427510+00:00",
+  "checked_at": "2026-08-24T03:41:36.484509+00:00",
   "checks": {
-    "PYTHONPATH ว่าง": {
+    "PYTHONPATH clean": {
       "status": "pass",
-      "detail": "ไม่มีอะไร shadow venv"
+      "detail": "nothing shadowing the venv"
     },
     "nvidia-smi": {
       "status": "pass",
-      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 38 | 145.00 W | 3090 MHz"
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 36 | 145.00 W | 3090 MHz"
     },
     "driver >= 570": {
       "status": "pass",
@@ -21,19 +21,19 @@
       "status": "pass",
       "detail": "(12, 0) = sm_120 Blackwell"
     },
-    "รัน CUDA kernel จริง": {
+    "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul สำเร็จ (checksum -716.9)"
+      "detail": "matmul succeeded (checksum 12673.8)"
     },
     "FP16 matmul": {
       "status": "pass",
-      "detail": "ใช้ได้"
+      "detail": "works"
     },
     "onnxruntime": {
       "status": "pass",
       "detail": "1.23.2 | providers: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']"
     },
-    "ORT ใช้ CUDA จริง": {
+    "ORT really on CUDA": {
       "status": "pass",
       "detail": "['CUDAExecutionProvider', 'CPUExecutionProvider']"
     },
@@ -43,17 +43,17 @@
     },
     "TensorRT 10 API": {
       "status": "pass",
-      "detail": "ใช้ execute_async_v3 + set_tensor_address (ไม่ใช่ execute_v2)"
+      "detail": "uses execute_async_v3 + set_tensor_address (not execute_v2)"
     },
-    "สร้าง trt.Builder": {
+    "create trt.Builder": {
       "status": "pass",
-      "detail": "ได้"
+      "detail": "ok"
     },
     "cuda-python": {
       "status": "pass",
       "detail": "12.9.7 via cuda.bindings.runtime"
     },
-    "trtexec ใน PATH": {
+    "trtexec on PATH": {
       "status": "pass",
       "detail": "&&&& RUNNING TensorRT.trtexec [TensorRT v101601] [b11]"
     },
@@ -77,9 +77,9 @@
       "status": "pass",
       "detail": "performance"
     },
-    "GPU state ตอนนี้": {
+    "GPU state now": {
       "status": "pass",
-      "detail": "P1, 2550 MHz"
+      "detail": "P1, 2542 MHz"
     },
     "system": {
       "status": "pass",

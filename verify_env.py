@@ -7,11 +7,11 @@ import subprocess
 import sys
 from datetime import datetime, timezone
  
-# ด่านตรวจก่อนเริ่มวัด — เขียนผลลง env_report.json เพื่อแนบไปกับ README
-# ตัวเลข benchmark ไม่มีความหมายถ้าไม่รู้ว่าวัดบนสภาพแวดล้อมไหน
+# Gate that runs before any measurement, writing env_report.json to go alongside the
+# README. Benchmark numbers mean nothing without knowing what they were measured on.
 #
-# ทุกด่านในไฟล์นี้มาจากปัญหาที่เจอจริงตอนติดตั้ง ไม่ใช่การเช็กเผื่อไว้
-# ที่มาของแต่ละด่านเขียนกำกับไว้ตรงตัวมัน
+# Every check here came from a problem hit during setup, not from checking things just
+# in case. Where each one came from is noted at the check itself.
 REPORT = {"checked_at": datetime.now(timezone.utc).isoformat(), "checks": {}, "versions": {}}
 FAILURES: list[str] = []
 WARNINGS: list[str] = []
@@ -19,9 +19,10 @@ WARNINGS: list[str] = []
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
  
  
-# FAIL = ห้ามวัดต่อ ผลที่วัดได้จะผิด
-# WARN = วัดได้ แต่ตัวเลขอาจแกว่งหรือเทียบข้ามเครื่องไม่ได้
-# แยกสองระดับเพราะถ้าทุกอย่างเป็น FAIL หมด คนจะเริ่มข้ามมันไปเลย
+# FAIL = do not measure, the results will be wrong.
+# WARN = you can measure, but numbers may wobble or not compare across machines.
+# Two levels rather than one, because if everything is a FAIL people start skipping
+# all of it.
 def ok(name, detail=""):
     print(f"  {GREEN}PASS{RESET}  {name} {DIM}{detail}{RESET}")
     REPORT["checks"][name] = {"status": "pass", "detail": detail}
@@ -39,8 +40,8 @@ def warn(name, detail=""):
     WARNINGS.append(name)
  
  
-# กลืน exception ทั้งหมดโดยตั้งใจ — สคริปต์วินิจฉัยที่ตายเองตอนหาเครื่องมือไม่เจอ
-# ใช้ไม่ได้ ต้องให้ผลออกมาเป็น FAIL/WARN ให้ครบทุกด่านเสมอ
+# Swallowing every exception is deliberate: a diagnostic script that dies when a tool
+# is missing is useless. Every check has to end in a FAIL or WARN, never a traceback.
 def sh(cmd: str) -> str | None:
     try:
         return subprocess.run(
@@ -56,7 +57,7 @@ def check_driver():
     out = sh("nvidia-smi --query-gpu=name,driver_version,memory.total,temperature.gpu,"
              "power.limit,clocks.max.sm --format=csv,noheader")
     if not out:
-        fail("nvidia-smi", "เรียกไม่ได้ — ไม่มี driver หรือไม่มี GPU")
+        fail("nvidia-smi", "could not run it — no driver, or no GPU")
         return
     parts = [p.strip() for p in out.splitlines()[0].split(",")]
     REPORT["versions"]["gpu_name"] = parts[0]
@@ -65,14 +66,14 @@ def check_driver():
     ok("nvidia-smi", " | ".join(parts))
  
     try:
-        # 570 คือ driver ตัวแรกที่รองรับ Blackwell (sm_120) เครื่องนี้ 595.84
+        # 570 is the first driver with Blackwell (sm_120) support; this machine has 595.84.
         major = int(parts[1].split(".")[0])
         if major < 570:
-            fail("driver >= 570", f"เจอ {parts[1]} — Blackwell ต้อง 570 ขึ้นไป")
+            fail("driver >= 570", f"found {parts[1]} — Blackwell needs 570 or newer")
         else:
             ok("driver >= 570", parts[1])
     except ValueError:
-        warn("driver version", f"parse ไม่ได้: {parts[1]}")
+        warn("driver version", f"could not parse: {parts[1]}")
  
  
 def check_torch():
@@ -80,16 +81,16 @@ def check_torch():
     try:
         import torch
     except ImportError:
-        fail("import torch", "ยังไม่ได้ติดตั้ง")
+        fail("import torch", "not installed")
         return
  
     REPORT["versions"]["torch"] = torch.__version__
     REPORT["versions"]["torch_cuda"] = torch.version.cuda
     ok("torch", f"{torch.__version__} (built for CUDA {torch.version.cuda})")
  
-    # is_available() เป็น True ได้ทั้งที่ใช้งานจริงไม่ได้ — มันเช็กแค่ว่ามี driver
-    # กับ CUDA runtime ไม่ได้เช็กว่า wheel ที่ลงมี kernel ของ sm_120 มาด้วย
-    # เลยต้องรัน matmul จริงข้างล่าง ดู "no kernel image" เป็นสัญญาณ
+    # is_available() can be True while nothing actually works — it only checks that a
+    # driver and CUDA runtime exist, not that the installed wheel ships sm_120 kernels.
+    # Hence the real matmul below, watching for "no kernel image" as the tell.
     if not torch.cuda.is_available():
         fail("torch.cuda.is_available()", "False")
         return
@@ -99,22 +100,22 @@ def check_torch():
     if cap == (12, 0):
         ok("compute capability", "(12, 0) = sm_120 Blackwell")
     else:
-        warn("compute capability", f"{cap} — สคริปต์ชุดนี้ตรวจมาสำหรับ (12, 0)")
+        warn("compute capability", f"{cap} — these scripts were checked against (12, 0)")
 
     try:
-    # นี่คือด่านที่จับ "torch ลงผิด build" ได้จริง: wheel ที่ build ให้ sm_90 ลงมา
-    # แล้ว import ได้ is_available() ได้ แต่ทุก kernel พังตอนเรียก
-    # ข้อความ error จะเป็น "no kernel image is available for execution"
-    # ซึ่งอ่านแล้วไม่รู้ว่าต้องไปลง cu128 เลยพิมพ์คำสั่งที่ถูกต่อท้ายให้เลย
+    # This is the check that actually catches "wrong torch build": a wheel built for
+    # sm_90 imports fine and passes is_available(), then every kernel fails on call.
+    # The error reads "no kernel image is available for execution", which does not tell
+    # you to install cu128 — so the right command is printed underneath.
         a = torch.randn(512, 512, device="cuda")
         b = (a @ a).sum().item()
         torch.cuda.synchronize()
-        ok("รัน CUDA kernel จริง", f"matmul สำเร็จ (checksum {b:.1f})")
+        ok("real CUDA kernel", f"matmul succeeded (checksum {b:.1f})")
     except RuntimeError as e:
         msg = str(e).split("\n")[0]
-        fail("รัน CUDA kernel จริง", msg)
+        fail("real CUDA kernel", msg)
         if "no kernel image" in msg:
-            print(f"       {DIM}-> ลง PyTorch ผิด build: "
+            print(f"       {DIM}-> wrong PyTorch build: "
                   f"pip install torch --index-url https://download.pytorch.org/whl/cu128{RESET}")
         return
 
@@ -122,30 +123,31 @@ def check_torch():
         h = torch.randn(256, 256, device="cuda", dtype=torch.float16)
         (h @ h).sum().item()
         torch.cuda.synchronize()
-        ok("FP16 matmul", "ใช้ได้")
+        ok("FP16 matmul", "works")
     except RuntimeError as e:
         warn("FP16 matmul", str(e).split("\n")[0])
  
  
-# torch ตัวล่าสุดมากับ cu130 แต่ onnxruntime-gpu release ยังเป็น
-# CUDA 12.x เลยถอย torch ลง cu128 ทั้งสแตก ด่านนี้คือตัวที่จะจับได้ถ้าคนอื่น
-# clone ไปแล้วลง torch ใหม่กว่าทับ — ORT จะตกไป CPU แบบเงียบๆ
+# The newest torch ships with cu130 while the onnxruntime-gpu release is still CUDA
+# 12.x, so the whole stack was held back to cu128. This check is what catches someone
+# cloning the repo and installing a newer torch over the top — ORT would quietly fall
+# back to CPU.
 def check_onnxruntime():
-    print("\n[3] ONNX Runtime (จุดที่ fallback เงียบบ่อยที่สุด)")
+    print("\n[3] ONNX Runtime (most common place for a silent fallback)")
     try:
         import onnxruntime as ort
     except ImportError:
-        fail("import onnxruntime", "ยังไม่ได้ติดตั้ง onnxruntime-gpu")
+        fail("import onnxruntime", "onnxruntime-gpu not installed")
         return
  
     REPORT["versions"]["onnxruntime"] = ort.__version__
     avail = ort.get_available_providers()
     ok("onnxruntime", f"{ort.__version__} | providers: {avail}")
  
-    # get_available_providers() บอกแค่ว่า wheel นี้ build มาพร้อมอะไร
-    # ไม่ได้บอกว่าสร้าง session จริงแล้วจะใช้ตัวไหน — ต้องทดสอบด้วยโมเดลจริงข้างล่าง
+    # get_available_providers() only says what this wheel was built with, not which
+    # provider a real session would pick — hence the actual model test below.
     if "CUDAExecutionProvider" not in avail:
-        fail("CUDAExecutionProvider ใน build", "wheel นี้เป็น CPU-only — ต้องลง onnxruntime-gpu")
+        fail("CUDAExecutionProvider in build", "this wheel is CPU-only — install onnxruntime-gpu")
         return
  
     try:
@@ -161,12 +163,13 @@ def check_onnxruntime():
             [helper.make_tensor_value_info("z", TensorProto.FLOAT, [64, 64])],
         )
         model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-        # กด ir_version ลงเป็น 9 เพราะแพ็กเกจ onnx ใหม่กว่า ORT อาจเขียน ir_version
-        # ที่ ORT ที่ลงไว้ยังไม่รองรับ แล้ว smoke test จะพังด้วยเหตุผลผิด
+        # Pin ir_version to 9: an onnx package newer than ORT can write an ir_version
+        # the installed ORT does not support, and the smoke test would then fail for
+        # the wrong reason.
         model.ir_version = 9
  
-        # ระบุ CUDAExecutionProvider ตัวเดียว ไม่ใส่ CPU สำรอง — ถ้าใส่ CPU ไว้ด้วย
-        # ORT จะตกไป CPU เงียบๆ แล้วด่านนี้ผ่านทั้งที่ควรจะ FAIL
+        # Ask for CUDAExecutionProvider alone, with no CPU fallback listed. Include CPU
+        # and ORT quietly falls back to it, and this check passes when it should fail.
         sess = ort.InferenceSession(
             model.SerializeToString(), providers=["CUDAExecutionProvider"]
         )
@@ -174,10 +177,10 @@ def check_onnxruntime():
         if "CUDAExecutionProvider" in used:
             x = np.ones((64, 64), np.float32)
             sess.run(None, {"x": x, "y": x})
-            ok("ORT ใช้ CUDA จริง", str(used))
+            ok("ORT really on CUDA", str(used))
         else:
-            fail("ORT ใช้ CUDA จริง",
-                 f"ตกไป {used} — แถว 'ONNX Runtime GPU' ในตารางจะเป็นตัวเลข CPU")
+            fail("ORT really on CUDA",
+                 f"fell back to {used} — the 'ONNX Runtime GPU' row would be CPU numbers")
     except Exception as e:
         fail("ORT smoke test", str(e).split("\n")[0])
  
@@ -187,84 +190,86 @@ def check_tensorrt():
     try:
         import tensorrt as trt
     except ImportError:
-        fail("import tensorrt", "ยังไม่ได้ติดตั้ง")
+        fail("import tensorrt", "not installed")
         return
  
     REPORT["versions"]["tensorrt"] = trt.__version__
-    # 10.8 คือ TRT ตัวแรกที่มี kernel ของ Blackwell — ต่ำกว่านี้ build ได้แต่จะตก
-    # ไป PTX JIT ซึ่งช้ากว่าและผลอาจต่างจากที่ควรได้
-    # (tensorrt_libs/ มี libnvinfer_builder_resource_sm120.so.10.16.1 อยู่จริง
-    #  แปลว่า builder มี kernel sm_120 พร้อมแล้ว ไม่ต้อง JIT)
+    # 10.8 is the first TRT with Blackwell kernels. Below that a build still succeeds
+    # but falls back to PTX JIT, which is slower and can give different results.
+    # (tensorrt_libs/ does contain libnvinfer_builder_resource_sm120.so.10.16.1, so the
+    #  builder has real sm_120 kernels and needs no JIT.)
     parts = [int(p) for p in trt.__version__.split(".")[:2]]
     if (parts[0], parts[1]) >= (10, 8):
         ok("tensorrt >= 10.8", trt.__version__)
     else:
-        fail("tensorrt >= 10.8", f"เจอ {trt.__version__} — Blackwell ต้อง 10.8 ขึ้นไป")
+        fail("tensorrt >= 10.8", f"found {trt.__version__} — Blackwell needs 10.8 or newer")
  
     if parts[0] >= 10:
-        ok("TensorRT 10 API", "ใช้ execute_async_v3 + set_tensor_address (ไม่ใช่ execute_v2)")
+        ok("TensorRT 10 API", "uses execute_async_v3 + set_tensor_address (not execute_v2)")
  
     try:
         logger = trt.Logger(trt.Logger.ERROR)
         trt.Builder(logger)
-        ok("สร้าง trt.Builder", "ได้")
+        ok("create trt.Builder", "ok")
     except Exception as e:
-        fail("สร้าง trt.Builder", str(e).split("\n")[0])
+        fail("create trt.Builder", str(e).split("\n")[0])
  
     try:
         try:
-            # cuda.cudart ถูก deprecate ย้ายมา cuda.bindings.runtime
-            # build_engine.py กับ benchmark.py มี fallback แบบเดียวกันนี้
+            # cuda.cudart is deprecated and moved to cuda.bindings.runtime.
+            # build_engine.py and benchmark.py carry the same fallback.
             from cuda.bindings import runtime as cudart  
             api = "cuda.bindings.runtime"
         except ImportError:
             from cuda import cudart  
-            api = "cuda.cudart (เก่า)"
+            api = "cuda.cudart (legacy)"
         try:
             from importlib.metadata import version
             ver = version("cuda-python")
         except Exception:
             ver = "unknown"
-        # TODO: บันทึกเวอร์ชันไว้เฉยๆ ยังไม่ได้เช็กว่า < 13 ตามที่ requirements pin ไว้
-        # (torch cu128 pin cuda-bindings<13 ถ้าปล่อยอิสระ pip จะลง 13.x แล้วชนกัน)
-        # ควรเพิ่มเป็น FAIL เพราะเป็นเงื่อนไขเดียวกับที่ requirements.txt บังคับอยู่
+        # TODO: the version is only recorded, never checked against the < 13 that
+        # requirements pins (torch cu128 pins cuda-bindings<13; left alone, pip installs
+        # 13.x and they clash). This should be a FAIL, since it is the same condition
+        # requirements.txt already enforces.
         REPORT["versions"]["cuda_python"] = ver
         ok("cuda-python", f"{ver} via {api}")
     except ImportError:
-        fail("cuda-python", "pip install cuda-python — สคริปต์ชุดนี้ใช้ cudart ไม่ใช่ pycuda")
+        fail("cuda-python", "pip install cuda-python — these scripts use cudart, not pycuda")
  
-    # WARN ไม่ใช่ FAIL เพราะ trtexec ไม่ได้มากับ pip wheel — มีแต่ใน GA tarball
-    # (source repo จาก GitHub ไม่มีโฟลเดอร์ bin/ ดาวน์โหลดผิดไฟล์แล้วจะไม่เจอ trtexec)
-    # ใช้เป็น cross-check เท่านั้น ไม่มีก็ยังวัดได้
+    # WARN rather than FAIL because trtexec does not ship with the pip wheel, only in
+    # the GA tarball. (The GitHub source repo has no bin/ folder, so downloading the
+    # wrong file leaves you without trtexec.) It is only used as a cross-check;
+    # measurement works fine without it.
     #
-    # ที่ตรวจแล้ว: trtexec รายงาน v101601 ตรงกับ tensorrt-cu12 ที่ลงผ่าน pip เป๊ะ
-    # (10.16.1.11) — สำคัญเพราะ engine ผูกกับเวอร์ชัน TRT ถ้าเลขไม่ตรง trtexec
-    # จะโหลด engine ที่ build จากสคริปต์นี้ไม่ได้
+    # Verified: trtexec reports v101601, matching the pip tensorrt-cu12 exactly
+    # (10.16.1.11). That matters because an engine is tied to its TensorRT version — if
+    # the numbers differ, trtexec cannot load engines built by these scripts.
     #
-    # GA tarball อยู่นอก repo และไม่ได้อยู่ใน PATH ถาวร — ถ้าจะใส่ ใส่แค่ $TRT_ROOT/bin
-    # อย่าแตะ LD_LIBRARY_PATH เพราะจะไปบัง .so ของ pip ที่ import tensorrt ใช้อยู่
-    # (ตอนนี้ทำงานดีอยู่แล้ว อย่าไปยุ่ง)
+    # The GA tarball lives outside the repo and is not permanently on PATH. If you add
+    # it, add only $TRT_ROOT/bin. Do not touch LD_LIBRARY_PATH: it would shadow the .so
+    # files pip's tensorrt import relies on, and that currently works.
     #
-    # ใช้ --help ไม่ใช่ --version เพราะ trtexec ไม่มีแฟล็ก --version
+    # --help rather than --version, because trtexec has no --version flag.
     if sh("which trtexec"):
-        # ตัดตั้งแต่ " #" เป็นต้นไปทิ้ง เพราะ trtexec สะท้อน path เต็มของตัวเอง
-        # กลับมาในบรรทัดแรก ซึ่งผูกกับ home ของเครื่องที่รัน แล้วจะติดไปกับ
-        # env_report.json ที่ commit ขึ้น repo — เอาเฉพาะเลขเวอร์ชันก็พอ
-        ok("trtexec ใน PATH",
+        # Cut everything from " #" onward: trtexec echoes its own full path on the
+        # first line, which is tied to the home directory of whoever ran it and would
+        # ride along into the committed env_report.json. The version is all we need.
+        ok("trtexec on PATH",
            sh("trtexec --help 2>&1 | head -1 | sed 's/ #.*//'") or "")
     else:
-        warn("trtexec ใน PATH",
-             "หาไม่เจอ — ปกติอยู่ที่ /usr/src/tensorrt/bin หรือใน site-packages/tensorrt_libs")
+        warn("trtexec on PATH",
+             "not found — usually in /usr/src/tensorrt/bin or site-packages/tensorrt_libs")
  
  
 def check_misc():
-    print("\n[5] ไลบรารีอื่น + สภาพเครื่อง")
+    print("\n[5] Other libraries + machine state")
     for mod in ("ultralytics", "cv2", "numpy", "pycocotools"):
         try:
             m = __import__(mod)
             v = getattr(m, "__version__", None)
-            # cv2 บางรุ่นไม่มี __version__ และชื่อ dist ไม่ตรงกับชื่อ module
-            # เลยต้องถาม importlib.metadata ด้วยชื่อแพ็กเกจแทน
+            # Some cv2 builds have no __version__, and the dist name does not match
+            # the module name, so ask importlib.metadata by package name instead.
             if v is None:                      
                 from importlib.metadata import version as _v
                 dist = {"cv2": "opencv-python"}.get(mod, mod)
@@ -275,25 +280,26 @@ def check_misc():
             REPORT["versions"][mod] = v
             ok(mod, v)
         except ImportError:
-            # pycocotools เป็น WARN เพราะใช้แค่ใน evaluate.py — benchmark.py
-            # (ซึ่งเป็นงานหลัก) รันได้โดยไม่มีมัน
-            (warn if mod == "pycocotools" else fail)(mod, "ยังไม่ได้ติดตั้ง")
+            # pycocotools is only a WARN because it is used solely by evaluate.py;
+            # benchmark.py, which is the main job, runs without it.
+            (warn if mod == "pycocotools" else fail)(mod, "not installed")
  
-    # governor เป็น powersave จะทำให้แถว CPU baseline ช้ากว่าความจริง แล้ว speedup
-    # ของ GPU ดูสวยเกินจริง — ตั้งค่าอยู่ได้แค่จนกว่าจะรีบูต ต้องรันใหม่ทุกครั้ง
+    # A powersave governor makes the CPU baseline row slower than the hardware really
+    # is, which flatters the GPU speedup. The setting only lasts until reboot, so it
+    # has to be redone each time.
     gov = sh("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
     REPORT["versions"]["cpu_governor"] = gov
     if gov == "performance":
         ok("CPU governor", gov)
     elif gov:
-        warn("CPU governor", f"'{gov}' — baseline CPU จะช้ากว่าจริง "
+        warn("CPU governor", f"'{gov}' — CPU baseline will read slower than reality "
                              f"(sudo cpupower frequency-set -g performance)")
     else:
-        warn("CPU governor", "อ่านไม่ได้")
+        warn("CPU governor", "could not read it")
  
     pstate = sh("nvidia-smi --query-gpu=pstate,clocks.sm --format=csv,noheader")
     if pstate:
-        ok("GPU state ตอนนี้", pstate)
+        ok("GPU state now", pstate)
  
     REPORT["versions"]["os"] = platform.platform()
     REPORT["versions"]["python"] = sys.version.split()[0]
@@ -304,32 +310,33 @@ def check_misc():
 def main():
     print(f"\n{'='*68}\n  Environment Verification\n{'='*68}")
  
-    # เคยพลาดเรื่อง venv สองแบบ: ลงของไปที่ ~/.local โดยไม่รู้ตัว และรัน
-    # verify script จาก terminal ที่ไม่ได้ activate
-    # แล้วเวอร์ชันดูเหมือนถอยหลัง (ultralytics 8.4.126 -> 8.4.104, cv2 5.0.0 -> 4.13.0,
-    # numpy 2.2.6 -> 1.26.4) โดยไม่มีอะไรบอกว่าผิด
-    # เลยใส่ guard ในโค้ดแทนที่จะพึ่งความจำ — ด่านนี้ต้องอยู่ก่อนทุกด่าน
+    # Two venv mistakes already made: installing into ~/.local without noticing, and
+    # running the verify script from a terminal that was never activated. Versions then
+    # appear to go backwards (ultralytics 8.4.126 -> 8.4.104, cv2 5.0.0 -> 4.13.0,
+    # numpy 2.2.6 -> 1.26.4) with nothing saying anything is wrong. Hence a guard in
+    # code rather than relying on memory — and it has to come before every other check.
     if sys.prefix == sys.base_prefix:
-        print(f"\n  {RED}ไม่ได้อยู่ใน venv{RESET} — รัน `source .venv/bin/activate` ก่อน")
-        print(f"  {DIM}ตอนนี้ python คือ {sys.executable}{RESET}\n")
+        print(f"\n  {RED}not inside the venv{RESET} — run `source .venv/bin/activate` first")
+        print(f"  {DIM}python is currently {sys.executable}{RESET}\n")
         return 1
     print(f"  {DIM}venv: {sys.prefix}{RESET}")
  
-    # ROS 2 setup.bash เซ็ต PYTHONPATH ซึ่ง venv ไม่ตัดให้
-    # ทำให้ pip freeze ปนแพ็กเกจ ROS ราว 150 ตัวเข้ามาใน lock file
-    # "อยู่ใน venv" ไม่ได้แปลว่า isolated จริง
+    # ROS 2's setup.bash sets PYTHONPATH, which a venv does not strip, so pip freeze
+    # pulls roughly 150 ROS packages into the lock file. Being "in a venv" does not
+    # mean actually isolated.
     #
-    # TODO: ชื่อด่านเป็น "PYTHONPATH ว่าง" ทั้งกรณีผ่านและไม่ผ่าน เลยพิมพ์ออกมาว่า
-    # "WARN PYTHONPATH ว่าง — เจอ 5 รายการ" ซึ่งอ่านแล้วขัดกันเอง ควรแยกชื่อ
+    # TODO: the check is named "PYTHONPATH clean" in both the passing and failing case,
+    # so it prints "WARN PYTHONPATH clean — found 5 entries", which contradicts itself.
+    # The names should differ.
     pypath = os.environ.get("PYTHONPATH", "")
     if pypath:
         entries = [p for p in pypath.split(":") if p]
-        warn("PYTHONPATH ว่าง", f"เจอ {len(entries)} รายการ: {entries[0]}"
+        warn("PYTHONPATH clean", f"found {len(entries)} entries: {entries[0]}"
                                 f"{' ...' if len(entries) > 1 else ''}")
-        print(f"       {DIM}-> รัน `env -u PYTHONPATH .venv/bin/pip freeze > "
-              f"requirements.lock.txt` เพื่อไม่ให้ lock ปน{RESET}")
+        print(f"       {DIM}-> run `env -u PYTHONPATH .venv/bin/pip freeze > "
+              f"requirements.lock.txt` to keep the lock file clean{RESET}")
     else:
-        ok("PYTHONPATH ว่าง", "ไม่มีอะไร shadow venv")
+        ok("PYTHONPATH clean", "nothing shadowing the venv")
  
     check_driver()
     check_torch()
@@ -337,22 +344,23 @@ def main():
     check_tensorrt()
     check_misc()
  
-    # TODO: ยังไม่มีด่านที่จับ nvidia-* wheel ที่ปน cu12 กับ cu13 ใน venv เดียวกัน
-    # ซึ่งเป็นอาการของ cu12 ปนกับ cu13 — ตอนนี้จับได้ทางอ้อมผ่าน ORT smoke test เท่านั้น
-    # ถ้าเพิ่ม: วน importlib.metadata หาแพ็กเกจขึ้นต้น nvidia- แล้วดูว่า suffix cu ตรงกันหมด
+    # TODO: nothing here catches nvidia-* wheels mixing cu12 and cu13 in one venv.
+    # Right now that is only caught indirectly, through the ORT smoke test. To add it:
+    # walk importlib.metadata for packages starting with nvidia- and check their cu
+    # suffixes all agree.
     with open("env_report.json", "w") as f:
         json.dump(REPORT, f, indent=2, ensure_ascii=False)
  
     print(f"\n{'='*68}")
     if FAILURES:
-        print(f"{RED}  {len(FAILURES)} FAIL{RESET} — แก้ให้ผ่านก่อนเริ่มวัด")
+        print(f"{RED}  {len(FAILURES)} FAIL{RESET} — fix these before measuring anything")
         for f_ in FAILURES:
             print(f"    - {f_}")
     else:
-        print(f"{GREEN}  ผ่านทุกข้อ{RESET} — เริ่มวัดได้")
+        print(f"{GREEN}  all checks passed{RESET} — ready to measure")
     if WARNINGS:
-        print(f"{YELLOW}  {len(WARNINGS)} WARN{RESET} — วัดได้ แต่ตัวเลขอาจแกว่ง")
-    print(f"  บันทึกลง env_report.json (แนบใน README)\n{'='*68}\n")
+        print(f"{YELLOW}  {len(WARNINGS)} WARN{RESET} — measurable, but numbers may wobble")
+    print(f"  written to env_report.json (attach it in the README)\n{'='*68}\n")
     return 1 if FAILURES else 0
  
  

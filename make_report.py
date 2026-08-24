@@ -6,8 +6,9 @@ from pathlib import Path
 
 
 def load_jsonl(p: str) -> list[dict]:
-    # คืน [] แทนที่จะพังถ้าไฟล์ยังไม่มี — accuracy.jsonl มักยังไม่เกิดตอนรัน
-    # benchmark เสร็จใหม่ๆ ควรได้ตารางเวลาออกมาก่อนโดยที่คอลัมน์ mAP ว่างไว้
+    # Return [] rather than blowing up when the file is missing — accuracy.jsonl often
+    # does not exist yet right after a benchmark run, and you should still get the
+    # timing table with the mAP column left blank.
     path = Path(p)
     if not path.exists():
         return []
@@ -15,9 +16,10 @@ def load_jsonl(p: str) -> list[dict]:
 
 
 def key_of(r: dict) -> tuple:
-    # join key ระหว่าง results.jsonl กับ accuracy.jsonl — ไม่รวม batch โดยตั้งใจ
-    # เพราะ mAP ไม่ขึ้นกับ batch size แถว b1 กับ b8 จึงใช้ค่า accuracy ตัวเดียวกันได้
-    # (ต้องสะกดตรงกับที่ benchmark.py และ evaluate.py เขียนลงไฟล์ ดู evaluate.py:record)
+    # Join key between results.jsonl and accuracy.jsonl. Batch is left out on purpose:
+    # mAP does not depend on batch size, so the b1 and b8 rows can share one accuracy
+    # value. (Must be spelled exactly as benchmark.py and evaluate.py write it — see
+    # evaluate.py:record.)
     return (r.get("runtime"), r.get("precision"), r.get("device"))
 
 
@@ -37,32 +39,32 @@ def main():
     results = load_jsonl(args.results)
     accs = load_jsonl(args.accuracy)
     if not results:
-        raise SystemExit(f"ไม่มีข้อมูลใน {args.results} — รัน benchmark.py ก่อน")
+        raise SystemExit(f"no data in {args.results} — run benchmark.py first")
 
-    # NOTE: ทั้งสองไฟล์เป็น append-only รัน config เดิมซ้ำจะได้แถวซ้ำในตาราง
-    # และ acc_map จะเก็บอันหลังสุดเงียบๆ (dict comprehension ทับของเดิม)
-    # ถ้าจะวัดใหม่ทั้งชุดให้ลบไฟล์ทิ้งก่อน
+    # NOTE: both files are append-only. Re-running the same config gives a duplicate
+    # row in the table, and acc_map silently keeps the last one (the dict comprehension
+    # overwrites). Delete the files before starting a fresh sweep.
     acc_map = {key_of(a): a for a in accs}
     outdir = Path(args.outdir)
 
-    # ---------------- ตาราง ----------------
+    # ---------------- table ----------------
     hdr = ("| Runtime | Precision | Device | Batch | p50 (ms) | p99 (ms) | "
            "mean ± std (ms) | FPS | E2E (ms) | mAP50-95 | Size (MB) | VRAM (MB) |")
     sep = "|" + "---|" * 12
     lines = [hdr, sep]
 
-    # TODO: เลือกแถวแรกที่เป็น PyTorch/GPU/batch 1 โดยไม่ได้เช็ก precision
-    # แต่หัวตารางข้างล่างเขียนตายตัวว่า "เทียบ PyTorch GPU FP32"
-    # ถ้ารัน --half ก่อนแล้วบรรทัดนั้นมาก่อนใน jsonl ตัวเลข speedup ทุกแถว
-    # จะเทียบกับ FP16 ใต้ป้ายที่บอกว่า FP32 — ต้องเพิ่มเงื่อนไข precision == "FP32"
+    # TODO: this picks the first PyTorch/GPU/batch 1 row without checking precision,
+    # while the heading below hardcodes "vs PyTorch GPU FP32". Run --half first and
+    # have that line land earlier in the jsonl, and every speedup is measured against
+    # FP16 under a label claiming FP32 — needs a precision == "FP32" condition.
     baseline_fps = None
     for r in results:
         if r["runtime"] == "PyTorch" and r["device"] == "GPU" and r.get("batch", 1) == 1:
             baseline_fps = r["fps"]
             break
 
-    # เรียงช้าไปเร็ว เพื่อให้อ่านตารางจากบนลงล่างแล้วเห็นเรื่องราวของการ optimize
-    # (PyTorch -> ONNX -> TRT FP16 -> TRT INT8) แทนที่จะต้องไล่หาเอง
+    # Slowest to fastest, so reading the table top to bottom tells the optimisation
+    # story (PyTorch -> ONNX -> TRT FP16 -> TRT INT8) instead of making you hunt.
     for r in sorted(results, key=lambda x: -x["latency_ms_per_image"]["p50"]):
         L = r["latency_ms_per_image"]
         a = acc_map.get(key_of(r))
@@ -77,13 +79,14 @@ def main():
             f"{L['mean']:.2f} ± {L['std_across_repeats']:.2f}",
             f"{r['fps']:.1f}",
             f"{r['end_to_end_ms']:.2f}",
-            # "—" ไม่ได้แปลว่า mAP เป็นศูนย์ แปลว่ายังไม่ได้รัน evaluate.py สำหรับ
-            # config นี้ หรือ key_of() ไม่ตรงกันระหว่างสองไฟล์
+            # "—" does not mean mAP is zero. It means evaluate.py has not been run for
+            # this config, or key_of() does not match between the two files.
             f"{a['mAP50_95']:.4f}" if a else "—",
             f"{r['model_size_mb']:.1f}",
-            # NOTE: คอลัมน์นี้เทียบข้ามแถวไม่ได้ — PyTorch รายงานเฉพาะ tensor,
-            # TensorRT รายงานทั้งการ์ดจาก nvidia-smi, ONNX ไม่รายงานเลย
-            # ดูเหตุผลเต็มที่ benchmark.py TensorRTRunner.peak_vram_mb
+            # NOTE: this column is not comparable across rows — PyTorch reports
+            # tensors only, TensorRT reports the whole card via nvidia-smi, and ONNX
+            # reports nothing. Full reasoning in
+            # benchmark.py TensorRTRunner.peak_vram_mb.
             f"{vram:.0f}" if vram else "—",
         ]
         lines.append("| " + " | ".join(cells) + " |")
@@ -91,7 +94,7 @@ def main():
     table = "\n".join(lines)
 
     if baseline_fps:
-        table += "\n\n**Speedup เทียบ PyTorch GPU FP32 (batch 1):**\n\n"
+        table += "\n\n**Speedup vs PyTorch GPU FP32 (batch 1):**\n\n"
         table += "| Config | Speedup |\n|---|---|\n"
         for r in sorted(results, key=lambda x: -x["fps"]):
             table += (f"| {r['runtime']} {r['precision']} {r['device']} "
@@ -101,18 +104,18 @@ def main():
     print(table)
     print(f"\n-> {outdir/'report_table.md'}")
 
-    # ---------------- กราฟ ----------------
-    # import ในนี้เพราะ matplotlib เป็น optional — ตารางคือผลลัพธ์หลัก
-    # กราฟเป็นของแถม ไม่ควรทำให้ทั้งสคริปต์พังถ้าไม่มี
+    # ---------------- figures ----------------
+    # Imported here because matplotlib is optional. The table is the real output; the
+    # figures are a bonus and should not take the whole script down when missing.
     try:
         import matplotlib
-        # ต้องเรียกก่อน import pyplot — เครื่องที่วัด benchmark มักไม่มี display
-        # ถ้าไม่ตั้ง Agg pyplot จะพยายามหา GUI backend แล้วพังตอน import
+        # Must come before importing pyplot: benchmark machines usually have no
+        # display, and without Agg pyplot hunts for a GUI backend and dies on import.
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
-        print("[warn] ไม่มี matplotlib — ข้ามการวาดกราฟ (pip install matplotlib)")
+        print("[warn] no matplotlib — skipping figures (pip install matplotlib)")
         return
 
     rs = sorted(results, key=lambda x: x["latency_ms_per_image"]["p50"])
@@ -123,12 +126,13 @@ def main():
 
     x = np.arange(len(rs))
     w = 0.38
-    # วาด p50 คู่ p99 เสมอ ไม่ใช่ mean อย่างเดียว — ระยะห่างระหว่างสองแท่งคือ
-    # tail latency ซึ่งเป็นตัวที่สำคัญจริงตอน deploy มากกว่าค่าเฉลี่ย
+    # Always plot p50 next to p99, never the mean alone — the gap between the two bars
+    # is tail latency, which matters more in deployment than the average does.
     fig, ax = plt.subplots(figsize=(max(8, len(rs) * 1.5), 5))
-    # TODO: err คือ std ของ mean ระหว่างรอบ แต่เอามาวางเป็น error bar ของแท่ง p50
-    # ซึ่งเป็นคนละสถิติกัน ควรใช้ std ของ p50 ระหว่างรอบ (ยังไม่ได้เก็บลง jsonl —
-    # ตอนนี้ benchmark.py เก็บแค่ p99_std_across_repeats)
+    # TODO: err is the std of the mean across rounds, but it is drawn as the error bar
+    # on the p50 bar, which is a different statistic. It should be the std of p50
+    # across rounds (not recorded in the jsonl yet — benchmark.py currently stores only
+    # p99_std_across_repeats).
     ax.bar(x - w / 2, p50, w, yerr=err, capsize=3, label="p50", color="#4C78A8")
     ax.bar(x + w / 2, p99, w, label="p99", color="#F58518")
     ax.set_xticks(x)
@@ -143,8 +147,9 @@ def main():
     fig.savefig(outdir / "fig_latency.png", dpi=150)
     print(f"-> {outdir/'fig_latency.png'}")
 
-    # กราฟนี้คือข้อสรุปของทั้งโปรเจกต์: เร็วขึ้นแลกกับ mAP ที่หายไปเท่าไร
-    # ตัวเลขเดี่ยวๆ ในตารางตอบไม่ได้ว่าคุ้มไหม ต้องเห็นทั้งสองแกนพร้อมกัน
+    # This figure is the whole project's conclusion: how much mAP each speedup costs.
+    # A single number in the table cannot say whether the trade was worth it — you have
+    # to see both axes at once.
     pts = [(r, acc_map[key_of(r)]) for r in results if key_of(r) in acc_map]
     if pts:
         fig, ax = plt.subplots(figsize=(7, 5.5))
@@ -162,7 +167,7 @@ def main():
         fig.savefig(outdir / "fig_tradeoff.png", dpi=150)
         print(f"-> {outdir/'fig_tradeoff.png'}")
     else:
-        print("[warn] ยังไม่มีข้อมูล accuracy ที่จับคู่ได้ — รัน evaluate.py ให้ครบทุก config")
+        print("[warn] no accuracy data matched up yet — run evaluate.py for every config")
 
 
 if __name__ == "__main__":

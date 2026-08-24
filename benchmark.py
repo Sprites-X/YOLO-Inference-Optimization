@@ -42,6 +42,32 @@ def gpu_state() -> dict:
         return {}
 
 
+def cpu_governor() -> str | None:
+    """The scaling governor, or None if the kernel does not expose one.
+
+    results.jsonl already carries gpu_before/gpu_after so a slow round can be blamed
+    on throttling rather than noise. The CPU row had no equivalent, even though its
+    validity rests entirely on this setting: under 'powersave' the CPU baseline reads
+    slower than the hardware really is, which inflates every GPU speedup measured
+    against it. It resets to the distro default on reboot, so knowing it was checked
+    once is not enough — it has to be recorded per run.
+
+    Reads every core rather than cpu0 alone: they are normally uniform, but a machine
+    part-way through a governor change would otherwise be recorded as whatever cpu0
+    happened to be.
+    """
+    paths = sorted(Path("/sys/devices/system/cpu").glob("cpu[0-9]*/cpufreq/scaling_governor"))
+    govs = set()
+    for gp in paths:
+        try:
+            govs.add(gp.read_text().strip())
+        except OSError:
+            continue
+    if not govs:
+        return None
+    return govs.pop() if len(govs) == 1 else "mixed:" + ",".join(sorted(govs))
+
+
 # ==========================================================================
 # Runners 
 # ==========================================================================
@@ -427,7 +453,14 @@ def main():
         device_label = "GPU"
 
     state_before = gpu_state()
+    governor = cpu_governor()
     print(f"[gpu] before: {state_before}")
+    # Only worth interrupting for on a CPU run: that is the row the governor distorts.
+    if args.device == "cpu" and governor not in (None, "performance"):
+        print(f"  [warn] CPU governor is '{governor}', not 'performance' — this baseline "
+              f"will read slower than the hardware really is, and every GPU speedup "
+              f"measured against it will look better than it is "
+              f"(sudo cpupower frequency-set -g performance)")
     print(f"[run] {runner.name} {runner.precision} {device_label} "
           f"batch={args.batch} warmup={args.warmup} iters={args.iters} "
           f"repeats={args.repeats}")
@@ -489,6 +522,7 @@ def main():
         "peak_vram_mb": runner.peak_vram_mb(),
         "gpu_before": state_before,
         "gpu_after": state_after,
+        "cpu_governor": governor,
         "rounds": rounds,
     }
     if args.runtime == "onnx":

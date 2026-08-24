@@ -53,13 +53,14 @@ def main():
     sep = "|" + "---|" * 12
     lines = [hdr, sep]
 
-    # TODO: this picks the first PyTorch/GPU/batch 1 row without checking precision,
-    # while the heading below hardcodes "vs PyTorch GPU FP32". Run --half first and
-    # have that line land earlier in the jsonl, and every speedup is measured against
-    # FP16 under a label claiming FP32 — needs a precision == "FP32" condition.
+    # precision == "FP32" is load-bearing, not decoration. The heading below states
+    # "vs PyTorch GPU FP32", so the baseline has to actually be that row. Without the
+    # check, running --half first puts an FP16 row earlier in the jsonl and every
+    # speedup silently gets measured against FP16 under a label claiming FP32.
     baseline_fps = None
     for r in results:
-        if r["runtime"] == "PyTorch" and r["device"] == "GPU" and r.get("batch", 1) == 1:
+        if (r["runtime"] == "PyTorch" and r["device"] == "GPU"
+                and r["precision"] == "FP32" and r.get("batch", 1) == 1):
             baseline_fps = r["fps"]
             break
 

@@ -1,16 +1,20 @@
-# TensorRT engine — ผูกกับ GPU + เวอร์ชัน TRT ที่ build ใช้เครื่องอื่นไม่ได้
+# TensorRT engines and the INT8 calibration cache — all tied to the GPU and the
+# TRT version that built them, so they are useless on another machine.
+# .cache.meta.json is the sidecar build_engine.py writes next to each cache;
+# *.cache alone does not match it.
 *.engine
 *.plan
 *.cache
+*.cache.meta.json
 
-# โมเดลและ dataset
+# Models and datasets
 *.pt
 *.onnx
 data/
 datasets/
 annotations/
 
-# ผลการวัด 
+# Measurement output
 results.jsonl
 accuracy.jsonl
 *.png

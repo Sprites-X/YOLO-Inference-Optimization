@@ -245,10 +245,10 @@ class TensorRTRunner:
             if nm in self.outputs:
                 self.host_out[nm] = np.empty(shape, dtype=dtype)
 
-        # TODO: recorded but unused. The intent was to subtract it in peak_vram_mb to
-        # separate the engine's memory from other processes', but that is not done yet.
-        base = gpu_state().get("mem_used_mb")
-        self._vram_after_load = base
+        # TODO: peak_vram_mb() reports nvidia-smi's whole-card usage, which counts every
+        # other process on the GPU too. Sampling gpu_state()["mem_used_mb"] here — after
+        # the engine is loaded and its buffers allocated, before any inference — and
+        # subtracting it there would isolate the engine's own footprint. Not done yet.
 
     def _ck(self, err):
         # cuda-python returns (error, value) tuples rather than a bare value, and what

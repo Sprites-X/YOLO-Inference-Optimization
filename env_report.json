@@ -1,9 +1,9 @@
 {
-  "checked_at": "2026-08-23T12:24:55.776160+00:00",
+  "checked_at": "2026-08-24T02:13:59.587423+00:00",
   "checks": {
     "PYTHONPATH ว่าง": {
-      "status": "warn",
-      "detail": "เจอ 2 รายการ: /opt/ros/humble/lib/python3.10/site-packages ..."
+      "status": "pass",
+      "detail": "ไม่มีอะไร shadow venv"
     },
     "nvidia-smi": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "รัน CUDA kernel จริง": {
       "status": "pass",
-      "detail": "matmul สำเร็จ (checksum 15981.8)"
+      "detail": "matmul สำเร็จ (checksum -12049.4)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -79,7 +79,7 @@
     },
     "GPU state ตอนนี้": {
       "status": "pass",
-      "detail": "P1, 2542 MHz"
+      "detail": "P1, 2557 MHz"
     },
     "system": {
       "status": "pass",

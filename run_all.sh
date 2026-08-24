@@ -5,18 +5,18 @@ CALIB=data/calib
 ANN=annotations/instances_val2017.json
 MODEL=yolov8n.pt
 
-echo "=== Phase 0 ==="
-python verify_env.py || { echo "แก้ FAIL ก่อนไปต่อ"; exit 1; }
+echo "=== environment ==="
+python verify_env.py || { echo "fix the failures before going further"; exit 1; }
 
-echo "=== Phase 2: export ==="
+echo "=== export ==="
 yolo export model=$MODEL format=onnx opset=17 dynamic=False simplify=True
 python build_engine.py --onnx yolov8n.onnx --precision fp16
 
-echo "=== Phase 3: INT8 calibration ==="
+echo "=== INT8 calibration ==="
 python build_engine.py --onnx yolov8n.onnx --precision int8 \
     --calib-dir $CALIB --calib-num 500
 
-echo "=== Phase 4: benchmark ==="
+echo "=== benchmark ==="
 python benchmark.py --images $IMAGES --runtime pytorch  --model $MODEL         --device cpu --iters 100
 python benchmark.py --images $IMAGES --runtime pytorch  --model $MODEL         --device cuda
 python benchmark.py --images $IMAGES --runtime onnx     --model yolov8n.onnx   --device cpu --iters 100
@@ -30,6 +30,6 @@ python evaluate.py --images $IMAGES --ann $ANN --runtime onnx     --model yolov8
 python evaluate.py --images $IMAGES --ann $ANN --runtime tensorrt --model yolov8n_fp16.engine
 python evaluate.py --images $IMAGES --ann $ANN --runtime tensorrt --model yolov8n_int8.engine --per-class
 
-echo "=== Phase 5: report ==="
+echo "=== report ==="
 python make_report.py
-echo "เสร็จ: report_table.md, fig_latency.png, fig_tradeoff.png"
+echo "done: report_table.md, fig_latency.png, fig_tradeoff.png"

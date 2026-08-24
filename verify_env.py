@@ -152,7 +152,6 @@ def check_onnxruntime():
  
     try:
         import numpy as np
-        import onnx
         from onnx import TensorProto, helper
  
         node = helper.make_node("Add", ["x", "y"], ["z"])

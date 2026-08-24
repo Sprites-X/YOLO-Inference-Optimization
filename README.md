@@ -29,12 +29,23 @@ TensorRT 10.16.1.11 / Python 3.10.12.
 Full detail in `env_report.json`, exact packages in `requirements.lock.txt`.
 
 ## What's here
-- `verify_env.py` — checks the things that fail silently:
-  ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels
-- `benchmark.py` — warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs
-- `build_engine.py` — TensorRT 10 builder with a real INT8 calibrator
-- `prepare_data.py` — deterministic 500-image measurement set from val2017
-- `fetch_train_pool.py` — pulls the train2017 pool used for INT8 calibration
+
+Run `./run_all.sh` to do the whole pipeline end to end. The individual steps, in
+the order it runs them:
+
+| | |
+|---|---|
+| `verify_env.py` | Gate before measuring anything. Checks what fails silently: ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels. Writes `env_report.json`. |
+| `prepare_data.py` | Deterministic 500-image measurement set from val2017. |
+| `fetch_train_pool.py` | Pulls the train2017 pool used for INT8 calibration. |
+| `build_engine.py` | TensorRT 10 builder, with a real INT8 calibrator and a fingerprinted calibration cache. |
+| `benchmark.py` | Latency: warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs. Appends to `results.jsonl`. |
+| `evaluate.py` | Accuracy: COCO mAP via pycocotools. Appends to `accuracy.jsonl`. |
+| `make_report.py` | Joins those two files into `report_table.md` and the figures. |
+| `common.py` | Shared preprocess and postprocess. Every runtime calls the same one — that is what makes the comparison a comparison. |
+
+`train_pool_manifest.txt` and `env_report.json` are committed so a clone can
+reproduce the same image pool and see what the numbers were measured on.
 
 ## Install
 

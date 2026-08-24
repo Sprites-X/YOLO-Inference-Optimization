@@ -1,7 +1,14 @@
+#!/usr/bin/env bash
+# Needs bash, not sh: `set -o pipefail` is not in POSIX sh.
 set -euo pipefail
 
 IMAGES=data/val500
-CALIB=data/calib
+# Point straight at the pool rather than copying a sample into data/calib first.
+# ImageCalibrator already does random.Random(0).shuffle(files)[:--calib-num], so
+# --calib-num 500 draws a deterministic 500 out of the 2000 without duplicating
+# them on disk. data/train_pool is train2017 and $IMAGES is val2017, so the calib
+# set still cannot overlap the images being scored.
+CALIB=data/train_pool
 ANN=annotations/instances_val2017.json
 MODEL=yolov8n.pt
 

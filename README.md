@@ -3,8 +3,8 @@
 Benchmarking YOLOv8n across PyTorch / ONNX Runtime /
 TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
 
-**Status:** Phase 1 complete — PyTorch baseline measured on
-500 COCO val2017 images. Export / TensorRT / INT8 still to come.
+**Status:** PyTorch baseline measured on 500 COCO val2017 images.
+ONNX export, TensorRT and INT8 still to come.
 
 ## Baseline (YOLOv8n, 640x640, batch 1, 500 images)
 
@@ -30,7 +30,7 @@ Full detail in `env_report.json`, exact packages in `requirements.lock.txt`.
 - `benchmark.py` — warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs
 - `build_engine.py` — TensorRT 10 builder with a real INT8 calibrator
 - `prepare_data.py` — deterministic 500-image measurement set from val2017
-- `fetch_train_pool.py` — pulls the train2017 calibration pool for Phase 3
+- `fetch_train_pool.py` — pulls the train2017 pool used for INT8 calibration
 
 ## Install
 
@@ -56,7 +56,7 @@ Measurement set — 500 images from val2017:
     unzip -j annotations_trainval2017.zip annotations/instances_val2017.json -d annotations/
     python prepare_data.py --src data/val2017
 
-Calibration pool for Phase 3 — 2000 images from train2017 (~340 MB):
+INT8 calibration pool — 2000 images from train2017 (~315 MB):
 
     python fetch_train_pool.py
 
@@ -68,12 +68,12 @@ scripts check for overlap anyway.
 
 `fetch_train_pool.py` downloads the images named in `train_pool_manifest.txt`
 one at a time rather than pulling `train2017.zip`, which is ~19 GB against the
-13 GB free on this machine. The guide does not require the full split — Phase 3
-only does `shuf -n 500` over the pool. The manifest is committed (34 KB) so a
+13 GB free on this machine. Calibration needs a few hundred images rather than a
+whole split, so a pool this size is plenty. The manifest is committed (34 KB) so a
 clone gets the same pool without re-deriving it from the 241 MB annotations
 archive; it is the first 2000 of all 118,287 train2017 filenames after a seeded
-shuffle. 2000 rather than 500 leaves room for the guide's suggestion to retry
-with 1000 images if INT8 mAP drops more than 3-4%.
+shuffle. 2000 rather than 500 leaves room to retry with 1000 images if INT8 turns
+out to cost too much mAP.
 
 Both selections are seeded (1337) and self-verifying — each script recomputes
 its manifest hash and exits non-zero on a mismatch, so pointing `--src` at the

@@ -6,18 +6,22 @@ TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
 **Status:** PyTorch baseline measured on 500 COCO val2017 images.
 ONNX export, TensorRT and INT8 still to come.
 
-## Baseline (YOLOv8n, 640x640, batch 1, 500 images)
+## Baseline (YOLOv8n, 640x640, batch 1)
 
-| Runtime | Device | Precision | p50 (ms) | p99 (ms) | FPS | mAP50-95 |
-|---|---|---|---|---|---|---|
-| PyTorch | RTX 5060 | FP32 | 3.76 | 4.54 | 261.9 | 0.4008 |
-| PyTorch | Ryzen 5 7500F | FP32 | 21.56 | 26.76 | 45.4 | — |
+| Runtime | Device | Precision | Images | p50 (ms) | p99 (ms) | FPS | mAP50-95 |
+|---|---|---|---|---|---|---|---|
+| PyTorch | RTX 5060 | FP32 | 500 | 3.76 | 4.54 | 261.9 | 0.4008 |
+| PyTorch | Ryzen 5 7500F | FP32 | 500 | 21.56 | 26.76 | 45.4 | — |
+| PyTorch | RTX 5060 | FP32 | 5000 (full val2017) | — | — | — | 0.3651 |
 
-Inference-only, CUDA-synchronised, mean of 3 runs of 300 iterations
-(CPU: 100) after 50 warm-up iterations. GPU is 5.8x the CPU baseline.
-mAP is measured at conf 0.001 / IoU 0.7 as COCO AP requires; the latency
-rows use deploy thresholds (0.25 / 0.45) — see `common.py` for why these
-differ on purpose.
+Latency is inference-only, CUDA-synchronised, mean of 3 runs of 300 iterations
+(CPU: 100) after 50 warm-up iterations, over the 500-image set. GPU is 5.8x the
+CPU baseline. The 5000-image row is accuracy only — a full-val2017 reference
+point, not a separate latency measurement.
+
+mAP is measured at conf 0.001 / IoU 0.7 as COCO AP requires; the latency rows use
+deploy thresholds (0.25 / 0.45) — see `common.py` for why these differ on
+purpose.
 
 ## Verified environment
 Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /
@@ -86,8 +90,35 @@ wrong directory fails immediately instead of silently benchmarking other images:
 
 val500 images are hardlinked from `data/val2017`, so they cost no extra disk.
 
-One caveat on the mAP column: it is measured over 500 images, so it sits a
-little above the 0.373 Ultralytics reports over all 5000. The number is for
-comparing runtimes on identical images, not for restating the published figure.
+## What the mAP numbers do and do not mean
+
+**Against the published figure.** Running `evaluate.py` over all 5000 val2017
+images gives mAP50-95 **0.3651**, against the **0.373** Ultralytics reports for
+these same weights. Running `yolo val model=yolov8n.pt data=coco.yaml` on this
+machine reproduces the published side at 0.374 (pycocotools) / 0.368 (Ultralytics'
+own metric), so the roughly 0.9-point gap is real and belongs to the postprocess
+here, not to the weights or the environment.
+
+**Where the gap comes from.** One difference in postprocess accounts for it:
+`yolo val` runs NMS with `multi_label=True`, so a single box can emit one
+detection per class scoring above the threshold. `common.postprocess` takes
+`argmax` over the class scores instead — one class per box. At conf 0.001 that
+changes how far the low-scoring tail carries the PR curve, which is exactly where
+COCO AP is won and lost. Everything else lines up: both letterbox to a square
+640x640 with `scaleup=False`, and both use conf 0.001 / IoU 0.7 / max_det 300.
+Rectangular inference is *not* a factor — it is off by default in `yolo val`.
+
+This is a deliberate trade. A single simple postprocess shared by all three
+runtimes is worth more here than matching a published number, because the
+comparison being made is between runtimes, and any NMS difference between them
+would show up as an accuracy difference that has nothing to do with the runtime.
+Adopting multi-label NMS would close most of the gap while making the shared
+postprocess more complex, and would not improve a single number this project
+actually reports.
+
+**On the 500-image subset.** The subset scores 0.4008 against 0.3651 on the full
+set — a 0.036 spread, which is large. mAP over 500 images is noisy, so the subset
+figure is only ever used to compare runtimes against each other on identical
+images. It is not comparable to any published number, including the one above.
 
 Results and analysis to follow.

@@ -14,6 +14,9 @@ data/
 datasets/
 annotations/
 
+# ultralytics scratch output (yolo val/predict writes plots + predictions.json here)
+runs/
+
 # Measurement output
 *.png
 !fig_*.png

@@ -1,66 +1,69 @@
-# requirements.txt — เจตนา: อะไรจำเป็นขั้นต่ำ และมาจาก index ไหน
+# requirements.txt — intent: what is needed at minimum, and which index it comes from.
 #
-# สำหรับติดตั้งซ้ำให้ได้สภาพเดิมเป๊ะ ให้ใช้ requirements.lock.txt แทน
-# ไฟล์นี้บอกว่าทำไมต้องมีแต่ละตัว — lock บอกว่าใช้เวอร์ชันไหนจริง
+# To reproduce the exact environment, use requirements.lock.txt instead.
+# This file says why each package is here; the lock file says which versions were used.
 #
 # ─────────────────────────────────────────────────────────────────────
-# ลำดับการติดตั้ง (สำคัญ — สองขั้นแรกไม่ได้มาจาก PyPI ปกติ)
+# Install order (matters — the first two steps do not come from ordinary PyPI)
 #
 #   python3 -m venv .venv && source .venv/bin/activate
 #   pip install --upgrade pip setuptools wheel packaging
 #
-#   # 1. PyTorch — ต้องระบุ index ของ pytorch.org ไม่งั้นจะได้ตัว CPU
-#   #    cu128 ไม่ใช่ cu130: onnxruntime-gpu release ยังเป็น CUDA 12.x
-#   #    ถ้าใช้ torch cu130 จะได้ nvidia lib สองเวอร์ชันปนกันใน venv เดียว
+#   # 1. PyTorch — the pytorch.org index must be given, or you get the CPU build.
+#   #    cu128 not cu130: the onnxruntime-gpu release is still CUDA 12.x, and
+#   #    torch cu130 would put two nvidia lib versions in the same venv.
 #   pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 \
 #       --index-url https://download.pytorch.org/whl/cu128
 #
-#   # 2. TensorRT — ต้องใช้ index ของ NVIDIA
-#   #    PyPI เสิร์ฟ sdist ที่ค้างเงียบตอน build metadata (ดึง lib 4.3GB
-#   #    โดยไม่มี progress bar) index ของ NVIDIA เสิร์ฟ wheel จริง
+#   # 2. TensorRT — needs NVIDIA's index.
+#   #    PyPI serves an sdist that hangs silently while building metadata
+#   #    (pulling 4.3GB of libs with no progress bar). NVIDIA's index serves
+#   #    real wheels.
 #   pip install --extra-index-url https://pypi.nvidia.com \
 #       tensorrt-cu12==10.16.1.11 \
 #       tensorrt-cu12-libs==10.16.1.11 \
 #       tensorrt-cu12-bindings==10.16.1.11
 #
-#   # 3. ที่เหลือ
+#   # 3. Everything else
 #   pip install -r requirements.txt
 #
-#   python verify_env.py     # ต้องไม่มี FAIL ก่อนเริ่มวัด
+#   python verify_env.py     # must report zero failures before measuring
 # ─────────────────────────────────────────────────────────────────────
 
 # --- inference runtimes --------------------------------------------------
-# ต้องเป็น build ที่มี CUDA EP จริง — verify_env.py เช็กว่าไม่ตกไป CPU เงียบๆ
+# Must be a build with a real CUDA EP — verify_env.py checks it does not quietly
+# fall back to CPU.
 onnxruntime-gpu>=1.23.0
 
-# TensorRT 10.8+ เท่านั้น (Blackwell sm_120)
-# pin ไว้เพราะ TRT 11 ออกแล้ว และโค้ดชุดนี้ใช้ TRT 10 API
-# (execute_async_v3 + IInt8EntropyCalibrator2 ซึ่งอาจถูกถอดใน 11)
-# ต้องลงจาก --extra-index-url https://pypi.nvidia.com ตามด้านบน
+# TensorRT 10.8+ only (Blackwell sm_120).
+# Pinned because TRT 11 is out and this code uses the TRT 10 API
+# (execute_async_v3 + IInt8EntropyCalibrator2, which may be gone in 11).
+# Install from --extra-index-url https://pypi.nvidia.com as above.
 tensorrt-cu12==10.16.1.11
 
-# TRT 10 sample ใช้ cuda-python (cudart) ไม่ใช่ pycuda แล้ว
-# <13 เพราะ torch cu128 pin cuda-bindings<13 ไว้ — ปล่อยอิสระจะได้ 13.x แล้วชนกัน
+# TRT 10 samples use cuda-python (cudart) rather than pycuda.
+# <13 because torch cu128 pins cuda-bindings<13 — left free, pip installs 13.x and they clash.
 cuda-python<13
 
-# --- โมเดลและ export -----------------------------------------------------
+# --- model and export ----------------------------------------------------
 ultralytics>=8.4.0
 onnx>=1.22.0
-onnxslim>=0.1.48        # ultralytics ย้ายจาก onnxsim มาใช้ตัวนี้แล้ว
+onnxslim>=0.1.48        # ultralytics moved from onnxsim to this
 
-# --- ประมวลผลภาพ / ประเมินผล --------------------------------------------
-# opencv 5.x ทดสอบแล้วใช้กับ common.py ได้ (letterbox + bbox mapping ตรงกัน)
-# ถ้าเจอปัญหาให้ถอยเป็น opencv-python==4.10.0.84
+# --- image processing / evaluation ---------------------------------------
+# opencv 5.x is tested against common.py (letterbox + bbox mapping agree).
+# Fall back to opencv-python==4.10.0.84 if it causes trouble.
 opencv-python>=4.10.0
 numpy>=1.26.0
-pycocotools>=2.0.11     # ต้อง >=2.0.11 ถึงจะเข้ากับ numpy 2.x
-matplotlib>=3.8.0       # make_report.py ใช้วาดกราฟ
+pycocotools>=2.0.11     # >=2.0.11 is the first version compatible with numpy 2.x
+matplotlib>=3.8.0       # make_report.py uses it for the figures
 
-# --- หมายเหตุ ------------------------------------------------------------
-# torch / torchvision ไม่ได้ระบุไว้ในนี้โดยตั้งใจ — ต้องลงจาก index ของ
-# pytorch.org ก่อน (ดูขั้นตอนที่ 1) ถ้าใส่ไว้ pip จะไปดึงตัว CPU จาก PyPI มาทับ
+# --- notes ---------------------------------------------------------------
+# torch / torchvision are deliberately not listed here — they have to come from
+# the pytorch.org index first (see step 1). List them and pip pulls the CPU build
+# from PyPI over the top.
 #
-# trtexec ไม่มีใน pip wheel — ถ้าต้องใช้เป็น cross-check ใน Phase 4
-# ต้องโหลด GA tar จาก developer.nvidia.com (เลือก CUDA 12.x + TAR ไม่ใช่ DEB)
-# แล้วเพิ่มแค่ $TRT_ROOT/bin เข้า PATH — อย่าเพิ่ม LD_LIBRARY_PATH
-# เพราะจะไปบัง .so ของ pip ที่ import tensorrt ใช้อยู่
+# trtexec does not ship in the pip wheel. To use it as a cross-check, download the
+# GA tar from developer.nvidia.com (pick CUDA 12.x and TAR, not DEB) and add only
+# $TRT_ROOT/bin to PATH — do not add LD_LIBRARY_PATH, it shadows the .so files
+# pip's tensorrt import relies on.

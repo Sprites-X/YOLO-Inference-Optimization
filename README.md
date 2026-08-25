@@ -41,14 +41,14 @@ and compares detections, and `run_all.sh` stops the run if they disagree.
 Same 500 images, same `common.py` pre/postprocess, conf 0.001 / IoU 0.7 as COCO AP
 requires.
 
-**The gate is not a pixel tolerance.** Two things make FP16 detections differ from FP32
-without anything being wrong with the export:
+**The gate is not a pixel tolerance.** Two things rule that out:
 
-- *Box error scales with box size.* yolov8 decodes a box by summing 16 DFL bins scaled
-  by the stride of the level it came from, so the ~3 decimal digits FP16 carries cost
-  more on a large box than a small one — 5.4 px on a 608 px box against 1.1 px on a
-  232 px box, the same small relative error. A flat pixel budget either fails the first
-  or waves the second through.
+- *A pixel delta means different things at different box sizes.* 5 px on a 600 px box
+  is nothing; 5 px on a 30 px box is a different detection. Measured over 497 matched
+  pairs against the FP16 engine, mean absolute delta is 0.17 px for boxes under 100 px
+  and 0.46 px for boxes over 500 px, while mean *relative* delta runs the other way —
+  0.38% against 0.08%. A per-box rule in pixels and one in percent fail at opposite
+  ends.
 - *NMS is a discrete choice.* On `000000097585.jpg` the two best candidates for one
   object score 0.75133 and 0.74966 in FP32. FP16 rounds both to exactly 0.75049, the
   tie-break then keeps the other one, and the surviving box moves 6.6 px. The same

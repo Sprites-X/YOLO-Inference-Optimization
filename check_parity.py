@@ -21,24 +21,31 @@ from common import DEPLOY_CONF, DEPLOY_IOU, postprocess, preprocess
 
 # Two gates on geometry, because two different things can go wrong.
 #
-# MIN_PAIR_IOU is per detection. It is scale-free on purpose: a flat pixel budget
-# cannot work here. FP16 carries ~3 decimal digits and yolov8 decodes a box by
-# summing 16 DFL bins scaled by the stride of the level it came from, so absolute
-# error grows with the box — measured here, a 608 px box lands 5.4 px out while a
-# 232 px box lands 1.1 px out, the same small relative error.
+# MIN_PAIR_IOU is per detection, and scale-free on purpose: the same pixel delta means
+# different things at different box sizes. 5 px on a 600 px box is nothing; 5 px on a
+# 30 px box is a different detection. Measured against the FP16 engine over 497 matched
+# pairs, mean absolute delta runs 0.17 px for boxes under 100 px and 0.46 px for boxes
+# over 500 px, while mean relative delta runs the other way, 0.38% against 0.08%. So
+# neither a pixel budget nor a percentage works as a per-box rule — they fail at
+# opposite ends. (Absolute delta does climb with box size, but weakly: r = 0.17. Not
+# the clean proportionality it first looked like, which is why the rule is not built
+# on it.)
 #
-# Worse, NMS is a discrete choice. On 000000097585.jpg the two best candidates for
-# one object score 0.75133 and 0.74966 in FP32; FP16 rounds both to exactly 0.75049,
-# the tie-break then keeps the other one, and the surviving box moves 6.6 px. Nothing
-# about the export is wrong — the same object is found either way — so the gate has
-# to ask whether both runtimes found the same object, which is what IoU asks.
+# The outliers are not precision at all. NMS is a discrete choice: on
+# 000000097585.jpg the two best candidates for one object score 0.75133 and 0.74966 in
+# FP32, FP16 rounds both to exactly 0.75049, the tie-break then keeps the other one,
+# and the surviving box moves 6.6 px. Nothing about the export is wrong — the same
+# object is found either way — so the gate asks whether both runtimes found the same
+# object, which is what IoU asks.
 MIN_PAIR_IOU = 0.90
 
-# MEAN_BOX_REL_TOL is the systematic gate, and it is what MIN_PAIR_IOU alone would
-# miss: an export that shifts or rescales every box slightly (a letterbox off by a
-# few px, the wrong pad colour) can stay above 0.90 IoU on every large box while
-# being wrong everywhere. Precision noise and the odd NMS swap move a handful of
-# boxes; a broken export moves all of them, so the mean separates the two.
+# MEAN_BOX_REL_TOL is a percentage too, but averaged over every pair rather than
+# applied to each one, which is what makes it usable where a per-box percentage is not.
+# It is the systematic gate, and catches what MIN_PAIR_IOU alone would miss: an export
+# that shifts or rescales every box slightly (a letterbox off by a few px, the wrong
+# pad colour) can stay above 0.90 IoU on every large box while being wrong everywhere.
+# Precision noise and the odd NMS swap move a handful of boxes; a broken export moves
+# all of them, so the mean separates the two.
 # Measured over 100 images: ONNX 0.014%, TensorRT FP16 0.240%. 0.5% is only ~2x the
 # FP16 figure, which is deliberate — it is tight enough to be worth something. INT8
 # will drift further and may need this raised; set it from a measurement then, not
@@ -122,7 +129,7 @@ def compare(runner, label, inputs, ref_raw, ref_dets, files, conf, iou, min_iou)
     frac_sum, n_pairs = 0.0, 0
     near_thresh = []      # detections excused for sitting on the conf threshold
     real_unmatched = []   # detections one runtime found and the other did not
-    over_tol = []
+    low_iou = []
     shape_fail = None
 
     for k, (x, meta) in enumerate(inputs):
@@ -160,8 +167,9 @@ def compare(runner, label, inputs, ref_raw, ref_dets, files, conf, iou, min_iou)
             pair_iou = float(iou_matrix(rb[i:i + 1], cb[j:j + 1])[0, 0])
             worst["min_pair_iou"] = min(worst["min_pair_iou"], pair_iou)
             if pair_iou < min_iou:
-                over_tol.append(f"{files[k].name}: cls {int(rc[i])} IoU {pair_iou:.4f}, "
-                                f"off {px:.2f} px on a {side:.0f} px box ({100 * frac:.2f}%)")
+                low_iou.append(f"{files[k].name}: cls {int(rc[i])} IoU {pair_iou:.4f}, "
+                                f"off {px:.2f} px on a {side:.0f} px long side "
+                                f"({100 * frac:.2f}%)")
 
         for i in un_r:
             entry = f"{files[k].name}: cls {int(rc[i])} score {rs[i]:.4f} in reference only"
@@ -172,7 +180,7 @@ def compare(runner, label, inputs, ref_raw, ref_dets, files, conf, iou, min_iou)
 
     worst["mean_frac"] = frac_sum / n_pairs if n_pairs else 0.0
     worst["n_pairs"] = n_pairs
-    return worst, near_thresh, real_unmatched, over_tol, shape_fail
+    return worst, near_thresh, real_unmatched, low_iou, shape_fail
 
 
 def main():
@@ -195,7 +203,12 @@ def main():
                    if p.suffix.lower() in IMG_EXT)[:args.n]
     if not files:
         raise SystemExit(f"no images found in {args.images}")
-    imgs = [im for im in (cv2.imread(str(p)) for p in files) if im is not None]
+    # Drop unreadable images from both lists together. Filtering only imgs would shift
+    # every later index, and each disagreement would then be reported against the wrong
+    # filename — the one thing this script exists to tell you.
+    kept = [(p, im) for p, im in ((p, cv2.imread(str(p))) for p in files) if im is not None]
+    files = [p for p, _ in kept]
+    imgs = [im for _, im in kept]
 
     print(f"[parity] {len(imgs)} images, conf={args.conf} iou={args.iou}")
     print(f"[parity] gates: matched-pair IoU >= {args.min_iou}, mean box drift "
@@ -225,11 +238,11 @@ def main():
     failures = []
     for spec in cmp_specs:
         runner, label = build_runner(spec)
-        worst, near_thresh, real_unmatched, over_tol, shape_fail = compare(
+        worst, near_thresh, real_unmatched, low_iou, shape_fail = compare(
             runner, label, inputs, ref_raw, ref_dets, files, args.conf, args.iou,
             args.min_iou)
 
-        ok = (not shape_fail and not real_unmatched and not over_tol
+        ok = (not shape_fail and not real_unmatched and not low_iou
               and worst["mean_frac"] <= MEAN_BOX_REL_TOL
               and worst["score"] <= SCORE_TOL)
         print(f"[{'PASS' if ok else 'FAIL'}] {label}")
@@ -240,7 +253,7 @@ def main():
                   f"{worst['min_pair_iou']:.4f}")
             print(f"        box drift        mean {100 * worst['mean_frac']:.3f}% of box "
                   f"size, worst {worst['box_px']:.2f} px on a {worst['box_side']:.0f} px "
-                  f"box ({100 * worst['box_frac']:.2f}%)"
+                  f"long side ({100 * worst['box_frac']:.2f}%)"
                   + (f"  ({worst['box_img']})" if worst["box_img"] else ""))
             print(f"        score max|Δ|     {worst['score']:.5f}")
             print(f"        raw max|Δ|       {worst['raw']:.4f} "
@@ -249,17 +262,20 @@ def main():
             print(f"        disagreements    {len(real_unmatched)}")
         for e in near_thresh:
             print(f"          ~ {e}")
-        for e in real_unmatched + over_tol:
+        for e in real_unmatched + low_iou:
             print(f"          ! {e}")
 
         if not ok:
             failures.append(f"{label}: " + (shape_fail or
-                            f"{len(real_unmatched)} disagreements, {len(over_tol)} boxes "
+                            f"{len(real_unmatched)} disagreements, {len(low_iou)} boxes "
                             f"below IoU {args.min_iou}, mean drift "
                             f"{100 * worst['mean_frac']:.3f}%"))
         if hasattr(runner, "close"):
             runner.close()
         print()
+
+    if hasattr(ref_runner, "close"):
+        ref_runner.close()
 
     if failures:
         print("PARITY FAILED — the exports do not agree with the reference model:")

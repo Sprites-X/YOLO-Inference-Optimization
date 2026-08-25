@@ -1,13 +1,13 @@
 {
-  "checked_at": "2026-08-25T07:27:21.565721+00:00",
+  "checked_at": "2026-08-25T08:11:07.352847+00:00",
   "checks": {
-    "PYTHONPATH clean": {
+    "PYTHONPATH": {
       "status": "pass",
-      "detail": "nothing shadowing the venv"
+      "detail": "clean — nothing shadowing the venv"
     },
     "nvidia-smi": {
       "status": "pass",
-      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 39 | 145.00 W | 3090 MHz"
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 37 | 145.00 W | 3090 MHz"
     },
     "driver >= 570": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul succeeded (checksum -20542.0)"
+      "detail": "matmul succeeded (checksum -7438.0)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -79,11 +79,15 @@
     },
     "GPU state now": {
       "status": "pass",
-      "detail": "P1, 2542 MHz"
+      "detail": "P1, 2557 MHz"
     },
     "system": {
       "status": "pass",
       "detail": "AMD Ryzen 5 7500F 6-Core Processor | py3.10.12"
+    },
+    "nvidia wheel CUDA majors": {
+      "status": "pass",
+      "detail": "all 18 importable wheels are cu12"
     }
   },
   "versions": {
@@ -103,6 +107,7 @@
     "cpu_governor": "performance",
     "os": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
     "python": "3.10.12",
-    "cpu": "AMD Ryzen 5 7500F 6-Core Processor"
+    "cpu": "AMD Ryzen 5 7500F 6-Core Processor",
+    "nvidia_wheel_cuda_major": "cu12"
   }
 }

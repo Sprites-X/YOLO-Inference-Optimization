@@ -69,7 +69,11 @@ def main():
     for r in sorted(results, key=lambda x: -x["latency_ms_per_image"]["p50"]):
         L = r["latency_ms_per_image"]
         a = acc_map.get(key_of(r))
-        vram = r.get("peak_vram_mb")
+        # vram_mb is the comparable number: card usage measured before the runtime
+        # loaded and again after the run, the same way for every row. peak_vram_mb is
+        # each runtime's own measure and means something different in every row, so it
+        # is only a fallback for rows recorded before vram_mb existed.
+        vram = r.get("vram_mb") or r.get("peak_vram_mb")
         cells = [
             r["runtime"],
             r["precision"],
@@ -84,10 +88,9 @@ def main():
             # this config, or key_of() does not match between the two files.
             f"{a['mAP50_95']:.4f}" if a else "—",
             f"{r['model_size_mb']:.1f}",
-            # NOTE: this column is not comparable across rows — PyTorch reports
-            # tensors only, TensorRT reports the whole card via nvidia-smi, and ONNX
-            # reports nothing. Full reasoning in
-            # benchmark.py TensorRTRunner.peak_vram_mb.
+            # Comparable for rows carrying vram_mb. An older row falls back to
+            # peak_vram_mb, which is not comparable to anything — PyTorch counted
+            # allocator tensors, TensorRT read the whole card, ONNX reported nothing.
             f"{vram:.0f}" if vram else "—",
         ]
         lines.append("| " + " | ".join(cells) + " |")
@@ -123,17 +126,17 @@ def main():
     labels = [label_of(r) for r in rs]
     p50 = [r["latency_ms_per_image"]["p50"] for r in rs]
     p99 = [r["latency_ms_per_image"]["p99"] for r in rs]
-    err = [r["latency_ms_per_image"]["std_across_repeats"] for r in rs]
+    # The bar sits on p50, so the spread has to be the spread of p50 across rounds.
+    # It used to be std_across_repeats, which is the spread of the *mean* — a different
+    # statistic drawn on the p50 bar. Rows written before benchmark.py recorded
+    # p50_std_across_repeats get no bar, which is better than a misleading one.
+    err = [r["latency_ms_per_image"].get("p50_std_across_repeats", 0.0) for r in rs]
 
     x = np.arange(len(rs))
     w = 0.38
     # Always plot p50 next to p99, never the mean alone — the gap between the two bars
     # is tail latency, which matters more in deployment than the average does.
     fig, ax = plt.subplots(figsize=(max(8, len(rs) * 1.5), 5))
-    # TODO: err is the std of the mean across rounds, but it is drawn as the error bar
-    # on the p50 bar, which is a different statistic. It should be the std of p50
-    # across rounds (not recorded in the jsonl yet — benchmark.py currently stores only
-    # p99_std_across_repeats).
     ax.bar(x - w / 2, p50, w, yerr=err, capsize=3, label="p50", color="#4C78A8")
     ax.bar(x + w / 2, p99, w, label="p99", color="#F58518")
     ax.set_xticks(x)

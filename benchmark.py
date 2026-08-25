@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import statistics
 import subprocess
 import time
@@ -21,24 +22,61 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
 # ==========================================================================
 # GPU state
 # ==========================================================================
+# What nvidia-smi is asked for, in order. index has to come first so the rows can be
+# told apart on a multi-GPU host; the three slowdown reasons are what turn "the GPU got
+# hot" into "the GPU actually throttled".
+_GPU_FIELDS = ["index", "temperature.gpu", "clocks.sm", "power.draw", "memory.used",
+               "clocks_throttle_reasons.sw_thermal_slowdown",
+               "clocks_throttle_reasons.hw_thermal_slowdown",
+               "clocks_throttle_reasons.sw_power_cap"]
+
+
+def _row_for_this_process(rows: dict) -> list | None:
+    """The nvidia-smi row for the GPU this process will run on."""
+    if not rows:
+        return None
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if visible:
+        # CUDA_VISIBLE_DEVICES remaps device ordinals, so this process's cuda:0 is
+        # whatever it lists first. A UUID cannot be matched against the index column,
+        # so fall through rather than report another card's temperature as this one's.
+        first = visible.split(",")[0].strip()
+        if first in rows:
+            return rows[first]
+    return rows[sorted(rows)[0]]
+
+
 def gpu_state() -> dict:
-    # Record temperature and clocks alongside every round, so a round that came out
-    # slower than its neighbours can be pinned on throttling rather than measurement
-    # noise. Without it there is nothing to go back and look at.
+    # Record temperature, clocks and whether the card throttled alongside every round,
+    # so a round that came out slower than its neighbours can be pinned on throttling
+    # rather than measurement noise. Without it there is nothing to go back and look at.
     #
-    # NOTE: this split(",") over the whole stdout only handles one GPU. With two,
-    # nvidia-smi returns two lines and float() dies on out[3] ('512\n38') → swallowed
-    # by the except → returns {} → all telemetry silently disappears. This machine has
-    # one card, so it has not bitten yet.
-    # TODO: on a multi-GPU host, splitlines() first and pick by CUDA_VISIBLE_DEVICES
+    # Parsed line by line rather than by splitting the whole stdout on ",". With two
+    # cards nvidia-smi returns two lines, and the old version handed float() '512\n38',
+    # which the bare except swallowed — every telemetry field vanished from the record
+    # and nothing said why.
     try:
         out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=temperature.gpu,clocks.sm,power.draw,memory.used",
+            ["nvidia-smi", f"--query-gpu={','.join(_GPU_FIELDS)}",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
-        ).stdout.strip().split(",")
-        return {"temp_c": float(out[0]), "sm_clock_mhz": float(out[1]),
-                "power_w": float(out[2]), "mem_used_mb": float(out[3])}
+        ).stdout.strip().splitlines()
+        rows = {}
+        for line in out:
+            parts = [c.strip() for c in line.split(",")]
+            if len(parts) == len(_GPU_FIELDS):
+                rows[parts[0]] = parts
+        parts = _row_for_this_process(rows)
+        if parts is None:
+            return {}
+
+        # nvidia-smi spells these "Active" / "Not Active".
+        reasons = [name.split(".")[-1] for name, val in
+                   zip(_GPU_FIELDS[5:], parts[5:]) if val.lower() == "active"]
+        return {"gpu_index": int(parts[0]),
+                "temp_c": float(parts[1]), "sm_clock_mhz": float(parts[2]),
+                "power_w": float(parts[3]), "mem_used_mb": float(parts[4]),
+                "throttled": bool(reasons), "throttle_reasons": reasons}
     except Exception:
         return {}
 
@@ -171,7 +209,8 @@ class PyTorchRunner:
     def peak_vram_mb(self):
         # Counts only tensors torch's allocator reserved, excluding the CUDA context
         # (~300-600MB), so it is not directly comparable to the TensorRT figure, which
-        # comes from nvidia-smi. See the NOTE on TensorRTRunner.peak_vram_mb.
+        # comes from nvidia-smi. record["vram_mb"] is the comparable one; see the note
+        # on TensorRTRunner.peak_vram_mb.
         if self.device == "cuda":
             return self.torch.cuda.max_memory_allocated() / 1024 / 1024
         return None
@@ -180,12 +219,14 @@ class PyTorchRunner:
         return Path(path).stat().st_size / 1024 / 1024
 
 
+# ONNX spells its tensor types like this; the table wants the short name.
+_ORT_PRECISION = {"tensor(float)": "FP32", "tensor(float16)": "FP16",
+                  "tensor(bfloat16)": "BF16", "tensor(double)": "FP64",
+                  "tensor(int8)": "INT8", "tensor(uint8)": "INT8"}
+
+
 class ONNXRunner:
     name = "ONNX Runtime"
-    # Hardcoded because the export is FP32 only for now.
-    # TODO: if an ONNX FP16 row gets added, read the dtype from the graph instead,
-    # or the table will label FP16 results as FP32.
-    precision = "FP32"
 
     def __init__(self, model_path: str, device: str):
         if device == "cuda":
@@ -213,6 +254,22 @@ class ONNXRunner:
         self.providers = used
         self.iname = self.sess.get_inputs()[0].name
         self.device = device
+        self.precision = self._graph_precision()
+
+    def _graph_precision(self) -> str:
+        """Precision label taken from the graph, not assumed.
+
+        It used to be the constant "FP32", which was true of every export this project
+        makes and would have quietly mislabelled the first FP16 one — a wrong precision
+        in the table is invisible, because the latency it sits next to looks plausible
+        either way.
+
+        Read off the output rather than the input: a converted model often keeps an FP32
+        input for convenience, and the output dtype is both what the graph computed in
+        and what common.postprocess has to de-letterbox.
+        """
+        out_type = self.sess.get_outputs()[0].type
+        return _ORT_PRECISION.get(out_type, out_type)
 
     def infer(self, batch: np.ndarray) -> np.ndarray:
         return self.sess.run(None, {self.iname: batch})[0]
@@ -275,8 +332,8 @@ class TensorRTRunner:
 
         self.precision = self._detect_precision(engine_path)
         self.batch = batch
-        self.host_out = {}
-        self.dev_mem = []
+        self.host_in, self.host_out = {}, {}
+        self.dev_mem, self.host_mem = [], []
 
         # Allocate once at init and reuse every iteration. Allocating and freeing each
         # round would fold cudaMalloc into the measured latency, which is not what a real
@@ -291,13 +348,21 @@ class TensorRTRunner:
             self.ptrs[nm] = (ptr, nbytes, shape, dtype)
             self.dev_mem.append(ptr)
             self.ctx.set_tensor_address(nm, int(ptr))
-            if nm in self.outputs:
-                self.host_out[nm] = np.empty(shape, dtype=dtype)
+            # Page-locked on both ends. cudaMemcpyAsync only becomes a real async DMA
+            # out of pinned memory; from pageable memory the driver stages through its
+            # own buffer, and the copy is neither async nor free. It also removes the
+            # hazard the input side used to carry — a temporary array could in principle
+            # be freed before its DMA finished.
+            host = self._pinned(shape, dtype, nbytes)
+            (self.host_out if nm in self.outputs else self.host_in)[nm] = host
 
-        # TODO: peak_vram_mb() reports nvidia-smi's whole-card usage, which counts every
-        # other process on the GPU too. Sampling gpu_state()["mem_used_mb"] here — after
-        # the engine is loaded and its buffers allocated, before any inference — and
-        # subtracting it there would isolate the engine's own footprint. Not done yet.
+    def _pinned(self, shape, dtype, nbytes) -> np.ndarray:
+        """A numpy view over page-locked host memory, freed in close()."""
+        ptr = self._ck(self.cudart.cudaHostAlloc(
+            nbytes, self.cudart.cudaHostAllocDefault))
+        self.host_mem.append(ptr)
+        buf = (ctypes.c_byte * nbytes).from_address(int(ptr))
+        return np.frombuffer(buf, dtype=dtype).reshape(shape)
 
     def _ck(self, err):
         # cuda-python returns (error, value) tuples rather than a bare value, and what
@@ -335,16 +400,15 @@ class TensorRTRunner:
         # the result (run_once does that at t3).
         cudart = self.cudart
         nm_in = self.inputs[0]
-        ptr, nbytes, _, dtype = self.ptrs[nm_in]
-        arr = np.ascontiguousarray(batch, dtype=dtype)
+        ptr, nbytes, _, _ = self.ptrs[nm_in]
 
-        # NOTE: arr is a local and lives in pageable memory, while cudaMemcpyAsync
-        # returns before the copy finishes. If ascontiguousarray actually made a new copy
-        # (mismatched dtype), that copy can be freed before the DMA completes. The usual
-        # TRT answer is pinned memory via cudaHostAlloc.
-        # TODO: not seen in practice, but never stress-tested with a large batch.
+        # Staged through the pinned buffer allocated at init. copyto casts if the engine
+        # takes a narrower input dtype, and the destination outlives the copy, so there
+        # is no temporary that could be freed while its DMA is still in flight.
+        arr = self.host_in[nm_in]
+        np.copyto(arr, batch, casting="unsafe")
         self._ck(cudart.cudaMemcpyAsync(
-            ptr, arr.ctypes.data, arr.nbytes,
+            ptr, arr.ctypes.data, nbytes,
             cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, self.stream))
 
         if not self.ctx.execute_async_v3(self.stream):
@@ -366,14 +430,13 @@ class TensorRTRunner:
         self._ck(self.cudart.cudaStreamSynchronize(self.stream))
 
     def peak_vram_mb(self):
-        # NOTE: this number is not comparable to the PyTorch row.
-        # This is nvidia-smi memory.used — the whole card, every process, CUDA context
-        # included. PyTorch reports max_memory_allocated(), tensors only, no context.
-        # ONNX returns None outright. All three land in the same VRAM column.
-        # TODO: to make this column mean anything, measure a baseline (mem_used with
-        # nothing loaded) and subtract it uniformly, or drop the column.
-        cur = gpu_state().get("mem_used_mb")
-        return cur if cur is not None else None
+        # nvidia-smi memory.used: the whole card, every process and the CUDA context
+        # included. Not comparable to the PyTorch row, which counts allocator tensors
+        # only, nor to ONNX, which reports nothing — that is why the number the table
+        # shows is record["vram_mb"], the difference between a sample taken before the
+        # runtime loaded and one taken after the run, measured the same way for all
+        # three. This stays as the runtime's own view.
+        return gpu_state().get("mem_used_mb")
 
     def model_size_mb(self, path):
         return Path(path).stat().st_size / 1024 / 1024
@@ -382,6 +445,12 @@ class TensorRTRunner:
         for p in self.dev_mem:
             self.cudart.cudaFree(p)
         self.dev_mem = []
+        # The numpy views in host_in/host_out point into this memory, so drop them
+        # first: touching one after cudaFreeHost is a use-after-free, not an exception.
+        self.host_in, self.host_out = {}, {}
+        for p in self.host_mem:
+            self.cudart.cudaFreeHost(p)
+        self.host_mem = []
         self.cudart.cudaStreamDestroy(self.stream)
 
 
@@ -490,6 +559,13 @@ def main():
 
     imgs = load_images(args.images, args.limit)
 
+    # Sampled before the runner exists, so the delta taken after the run is the VRAM
+    # this runtime needed, CUDA context and all, measured identically for all three.
+    # The per-runner peak_vram_mb() numbers cannot be compared to each other: PyTorch
+    # counts allocator tensors only, TensorRT reads the whole card, ONNX reports
+    # nothing at all.
+    vram_before = gpu_state().get("mem_used_mb")
+
     if args.runtime == "pytorch":
         runner = PyTorchRunner(args.model, args.device, args.half)
         device_label = "GPU" if args.device == "cuda" else "CPU"
@@ -531,7 +607,12 @@ def main():
               f"({time.perf_counter()-t:.1f}s, GPU {s['gpu'].get('temp_c','?')}°C)")
 
     state_after = gpu_state()
+    vram_after = state_after.get("mem_used_mb")
+    vram_delta = (round(vram_after - vram_before, 1)
+                  if device_label == "GPU" and None not in (vram_before, vram_after)
+                  else None)
     means = [r["mean_ms"] for r in rounds]
+    p50s = [r["p50_ms"] for r in rounds]
     p99s = [r["p99_ms"] for r in rounds]
 
     # Append so results from several configs pile up in one file for make_report.py.
@@ -556,7 +637,10 @@ def main():
         "latency_ms_per_image": {
             "mean": statistics.mean(means),
             "std_across_repeats": statistics.pstdev(means) if len(means) > 1 else 0.0,
-            "p50": statistics.mean([r["p50_ms"] for r in rounds]),
+            "p50": statistics.mean(p50s),
+            # Recorded because make_report draws the error bar on the p50 bar, and the
+            # spread of the mean is a different statistic from the spread of p50.
+            "p50_std_across_repeats": statistics.pstdev(p50s) if len(p50s) > 1 else 0.0,
             "p99": statistics.mean(p99s),
             "p99_std_across_repeats": statistics.pstdev(p99s) if len(p99s) > 1 else 0.0,
         },
@@ -568,6 +652,11 @@ def main():
         "postprocess_ms": statistics.mean([r["post_mean_ms"] for r in rounds]),
         "end_to_end_ms": statistics.mean([r["e2e_mean_ms"] for r in rounds]),
         "model_size_mb": runner.model_size_mb(args.model),
+        # The comparable one. None on CPU runs, where card usage says nothing about
+        # what the run needed.
+        "vram_mb": vram_delta,
+        # The runtime's own view, kept because it answers a different question for
+        # PyTorch (tensors the allocator reserved, no context).
         "peak_vram_mb": runner.peak_vram_mb(),
         "gpu_before": state_before,
         "gpu_after": state_after,
@@ -589,17 +678,24 @@ def main():
           f"(pre {record['preprocess_ms']:.3f} / post {record['postprocess_ms']:.3f})")
     print(f"  throughput     : {record['fps']:.1f} img/s")
     print(f"  model size     : {record['model_size_mb']:.2f} MB")
-    # 15°C is a guessed threshold, not confirmed against where this card actually
-    # starts throttling.
-    # NOTE: the GPU idles at 37-40°C; never measured under sustained load.
-    # TODO: use gpu_before/gpu_after from real runs to calibrate this.
     if state_before.get("temp_c") and state_after.get("temp_c"):
         d = state_after["temp_c"] - state_before["temp_c"]
         print(f"  GPU temp       : {state_before['temp_c']:.0f} -> "
               f"{state_after['temp_c']:.0f} °C ({d:+.0f})")
-        if d > 15:
-            print("  [warn] large temperature rise — may have throttled mid-run. "
-                  "Let it reach steady state first, or lock clocks with nvidia-smi -lgc")
+    if record["vram_mb"] is not None:
+        print(f"  VRAM           : {record['vram_mb']:.0f} MB over baseline")
+
+    # This used to warn on a temperature rise over 15°C, a number picked without ever
+    # checking where this card throttles — it would have fired on a run that was fine
+    # and stayed quiet on one that was not. nvidia-smi reports the slowdown flags
+    # directly, so ask instead of inferring: gpu_state() collects them every round.
+    hot = [(i, r["gpu"].get("throttle_reasons", []))
+           for i, r in enumerate(rounds) if r["gpu"].get("throttled")]
+    if hot:
+        detail = "; ".join(f"round {i}: {', '.join(reasons)}" for i, reasons in hot)
+        print(f"  [warn] the GPU throttled during this run ({detail}) — these numbers "
+              f"are below what the card does at steady state. Let it settle, or lock "
+              f"clocks with nvidia-smi -lgc")
     print(f"  -> appended to {args.out}\n{'-'*60}")
 
     if hasattr(runner, "close"):

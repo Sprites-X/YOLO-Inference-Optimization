@@ -52,6 +52,47 @@ def sh(cmd: str) -> str | None:
  
  
 # --------------------------------------------------------------------------
+def check_nvidia_wheel_majors():
+    """Every cu-suffixed nvidia wheel in this venv has to agree on the CUDA major.
+
+    Two majors side by side means two wheels shipping the same sonames, and whichever
+    the loader reaches first wins. Until this existed the condition was only caught
+    indirectly, by the ONNX Runtime smoke test failing once the wrong one won — which
+    points the blame at ONNX Runtime rather than at the install.
+
+    Counts only what this interpreter can import. Packages in the user site
+    (~/.local/lib) show up in `pip list` even from inside a venv, but are not on
+    sys.path when include-system-site-packages is false, so they cannot affect a run
+    and must not fail this check. On this machine that is the whole cu13 set.
+    """
+    import re
+    from importlib.metadata import distributions
+
+    by_major = {}
+    for dist in distributions():
+        name = (dist.metadata["Name"] or "").lower()
+        if not name.startswith(("nvidia-", "tensorrt")):
+            continue
+        # tensorrt_cu12 uses an underscore where nvidia-cublas-cu12 uses a dash.
+        m = re.search(r"[-_]cu(\d+)", name)
+        if m:
+            by_major.setdefault(m.group(1), set()).add(name)
+
+    if not by_major:
+        warn("nvidia wheel CUDA majors", "no cu-suffixed nvidia wheels found to check")
+        return
+    if len(by_major) > 1:
+        detail = "; ".join(
+            f"cu{k}: {', '.join(sorted(v)[:3])}{' ...' if len(v) > 3 else ''}"
+            for k, v in sorted(by_major.items()))
+        fail("nvidia wheel CUDA majors",
+             f"two CUDA majors importable in one venv — {detail}")
+        return
+    major, pkgs = next(iter(by_major.items()))
+    REPORT["versions"]["nvidia_wheel_cuda_major"] = f"cu{major}"
+    ok("nvidia wheel CUDA majors", f"all {len(pkgs)} importable wheels are cu{major}")
+
+
 def check_driver():
     print("\n[1] NVIDIA driver / GPU")
     out = sh("nvidia-smi --query-gpu=name,driver_version,memory.total,temperature.gpu,"
@@ -268,12 +309,17 @@ def check_tensorrt():
             ver = version("cuda-python")
         except Exception:
             ver = "unknown"
-        # TODO: the version is only recorded, never checked against the < 13 that
-        # requirements pins (torch cu128 pins cuda-bindings<13; left alone, pip installs
-        # 13.x and they clash). This should be a FAIL, since it is the same condition
-        # requirements.txt already enforces.
         REPORT["versions"]["cuda_python"] = ver
-        ok("cuda-python", f"{ver} via {api}")
+        # requirements.txt pins cuda-python<13, because torch cu128 pins
+        # cuda-bindings<13 and pip left to itself installs 13.x, which clashes. Checked
+        # here as well: an environment drifts after install, and a pin in a file nobody
+        # re-runs is not a guarantee.
+        major = ver.split(".")[0]
+        if major.isdigit() and int(major) >= 13:
+            fail("cuda-python < 13",
+                 f"{ver} clashes with torch cu128 — pip install 'cuda-python<13'")
+        else:
+            ok("cuda-python", f"{ver} via {api}")
     except ImportError:
         fail("cuda-python", "pip install cuda-python — these scripts use cudart, not pycuda")
  
@@ -365,18 +411,19 @@ def main():
     # pulls roughly 150 ROS packages into the lock file. Being "in a venv" does not
     # mean actually isolated.
     #
-    # TODO: the check is named "PYTHONPATH clean" in both the passing and failing case,
-    # so it prints "WARN PYTHONPATH clean — found 5 entries", which contradicts itself.
-    # The names should differ.
+    # Named for the thing being checked, not for the outcome. It used to be called
+    # "PYTHONPATH clean" in both branches and printed "WARN PYTHONPATH clean — found 5
+    # entries", contradicting itself. One neutral name also keeps the key stable in
+    # env_report.json, so two reports can be diffed.
     pypath = os.environ.get("PYTHONPATH", "")
     if pypath:
         entries = [p for p in pypath.split(":") if p]
-        warn("PYTHONPATH clean", f"found {len(entries)} entries: {entries[0]}"
-                                f"{' ...' if len(entries) > 1 else ''}")
+        warn("PYTHONPATH", f"{len(entries)} entries shadowing the venv: {entries[0]}"
+                           f"{' ...' if len(entries) > 1 else ''}")
         print(f"       {DIM}-> run `env -u PYTHONPATH .venv/bin/pip freeze > "
               f"requirements.lock.txt` to keep the lock file clean{RESET}")
     else:
-        ok("PYTHONPATH clean", "nothing shadowing the venv")
+        ok("PYTHONPATH", "clean — nothing shadowing the venv")
  
     check_driver()
     check_torch()
@@ -384,10 +431,8 @@ def main():
     check_tensorrt()
     check_misc()
  
-    # TODO: nothing here catches nvidia-* wheels mixing cu12 and cu13 in one venv.
-    # Right now that is only caught indirectly, through the ORT smoke test. To add it:
-    # walk importlib.metadata for packages starting with nvidia- and check their cu
-    # suffixes all agree.
+    check_nvidia_wheel_majors()
+
     with open("env_report.json", "w") as f:
         json.dump(REPORT, f, indent=2, ensure_ascii=False)
  

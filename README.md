@@ -196,3 +196,19 @@ figure is only ever used to compare runtimes against each other on identical
 images. It is not comparable to any published number, including the one above.
 
 Results and analysis to follow.
+
+## License
+
+AGPL-3.0 — full text in `LICENSE`.
+
+Copyright (C) 2026 Sprites.
+
+The permissive licence you might expect on a benchmark harness would not be honest
+here. These scripts import `ultralytics`, which is AGPL-3.0, and the model they measure
+is `yolov8n.pt` under the same terms, so this repository takes that licence rather than
+leaving the question open. Neither the library nor the weights are redistributed here —
+both are fetched during setup and are listed in `.gitignore`.
+
+Everything the comparison depends on is under a permissive licence of its own: PyTorch
+(BSD-3-Clause), ONNX Runtime (MIT) and pycocotools (BSD). TensorRT is NVIDIA's, used
+through the pip wheels and not redistributed.

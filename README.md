@@ -201,13 +201,16 @@ Results and analysis to follow.
 
 AGPL-3.0 — full text in `LICENSE`.
 
-Copyright (C) 2026 Sprites.
+Copyright (C) 2026 Phongsakon Sithong.
 
 The permissive licence you might expect on a benchmark harness would not be honest
 here. These scripts import `ultralytics`, which is AGPL-3.0, and the model they measure
-is `yolov8n.pt` under the same terms, so this repository takes that licence rather than
-leaving the question open. Neither the library nor the weights are redistributed here —
-both are fetched during setup and are listed in `.gitignore`.
+is `yolov8n.pt` under the same terms — the checkpoint is a pickled `DetectionModel`
+holding references to `ultralytics.nn.modules`, so it cannot be loaded at all without
+the library present. The dependency is structural rather than incidental, so this
+repository takes the same licence instead of leaving the question open. Neither the
+library nor the weights are redistributed here: both are fetched during setup and are
+listed in `.gitignore`.
 
 Everything the comparison depends on is under a permissive licence of its own: PyTorch
 (BSD-3-Clause), ONNX Runtime (MIT) and pycocotools (BSD). TensorRT is NVIDIA's, used

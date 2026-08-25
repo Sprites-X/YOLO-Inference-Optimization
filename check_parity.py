@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from benchmark import IMG_EXT, ONNXRunner, PyTorchRunner, TensorRTRunner
-from common import DEPLOY_CONF, DEPLOY_IOU, postprocess, preprocess
+from common import DEPLOY_CONF, DEPLOY_IOU, _xywh2xyxy, postprocess, preprocess
 
 # The gate between export and measurement. An export that quietly changed the model
 # — wrong opset, a layer TRT fused differently, an input laid out the way the runtime
@@ -39,6 +39,16 @@ from common import DEPLOY_CONF, DEPLOY_IOU, postprocess, preprocess
 # object, which is what IoU asks.
 MIN_PAIR_IOU = 0.90
 
+# IoU stops being a fair question on a very small box. 1.14 px of disagreement on a
+# 28 px box is IoU 0.9093 — which is the worst pair ONNX FP32 produces against PyTorch
+# FP32 over the 500, two runtimes that are numerically all but identical. A slightly
+# smaller box would put a correct export under 0.90. So a pair also passes if the boxes
+# are within this many pixels outright: below that, the two ways of being the same box
+# are "they overlap well" or "they are a pixel apart", and small boxes can only satisfy
+# the second. Checked against the perturbation table below — the floor does not blunt
+# any of it.
+BOX_ABS_FLOOR_PX = 2.0
+
 # MEAN_BOX_REL_TOL is a percentage too, but averaged over every pair rather than
 # applied to each one, which is what makes it usable where a per-box percentage is not.
 # It is the systematic gate, and catches what MIN_PAIR_IOU alone would miss: an export
@@ -46,10 +56,25 @@ MIN_PAIR_IOU = 0.90
 # pad colour) can stay above 0.90 IoU on every large box while being wrong everywhere.
 # Precision noise and the odd NMS swap move a handful of boxes; a broken export moves
 # all of them, so the mean separates the two.
-# Measured over 100 images: ONNX 0.014%, TensorRT FP16 0.240%. 0.5% is only ~2x the
+# Measured over the full 500: ONNX 0.014%, TensorRT FP16 0.256%. 0.5% is only ~2x the
 # FP16 figure, which is deliberate — it is tight enough to be worth something. INT8
 # will drift further and may need this raised; set it from a measurement then, not
 # from a guess now.
+#
+# That this gate earns its place was checked rather than assumed, by perturbing a
+# working engine's output and watching which gate fires:
+#
+#   perturbation      verdict   mean drift   pairs failing per-box   unmatched
+#   none                 pass       0.240%                       0           0
+#   x shifted 1 px       fail       1.338%                       0           0
+#   x shifted 3 px       fail       3.806%                     184           0
+#   x shifted 10 px      fail       8.508%                     298         153
+#   width x1.02          fail       0.864%                       0           0
+#   width x1.10          fail       3.819%                      11           0
+#
+# The two rows that matter are the ones where nothing per-box fires: a 1 px shift and a
+# 2% widening are caught by the mean alone. Without it both would pass. That is the
+# whole reason there are two gates rather than one.
 MEAN_BOX_REL_TOL = 0.005
 SCORE_TOL = 0.02
 
@@ -64,6 +89,24 @@ THRESHOLD_BAND = 0.05
 # Below this IoU two boxes are not the same detection, so a delta between them is
 # meaningless — they are counted as unmatched instead.
 MATCH_IOU = 0.5
+
+# How closely a kept box has to match one of the other runtime's pre-NMS candidates to
+# count as the same box rather than a different one.
+#
+# This is what makes MIN_PAIR_IOU survivable. Comparing the box one runtime kept
+# against the box the other kept is ill-posed wherever an object has near-duplicate
+# candidates: NMS keeps exactly one, the scores deciding it can differ in the fourth
+# decimal, and the two survivors can then sit 20% of a box apart while both models
+# produced both boxes. Over the full 500 images four pairs land between 0.79 and 0.88
+# IoU for that reason alone — on 000000394206.jpg PyTorch keeps a box scoring 0.46719
+# and TensorRT one scoring 0.46680, and PyTorch's own candidates contain TensorRT's box
+# at 0.9979 IoU scoring 0.46665.
+#
+# So a pair that fails MIN_PAIR_IOU is checked against the candidates each side
+# produced before NMS ran. If both kept boxes appear on both sides, the models agree
+# and only the tie-break differs. If they do not, the export really did move a box.
+# Measured on those four: 0.9878 to 0.9979, so 0.95 separates them from a real miss.
+CANDIDATE_IOU = 0.95
 
 
 def build_runner(spec: str):
@@ -123,16 +166,63 @@ def match(ref, cmp):
             [j for j in range(len(cb)) if j not in used_c])
 
 
-def compare(runner, label, inputs, ref_raw, ref_dets, files, conf, iou, min_iou):
+def class_candidates(raw: np.ndarray, cls_id: int, conf: float, meta):
+    """Pre-NMS boxes of one class above conf, mapped back to original image coordinates.
+
+    Mirrors common.postprocess up to the point NMS runs, so the boxes are comparable to
+    the detections it returns. Only built for a pair that already failed MIN_PAIR_IOU,
+    which is rare enough that the cost does not matter.
+    """
+    r = raw[0] if raw.ndim == 3 else raw
+    if r.shape[0] < r.shape[1]:
+        r = r.T
+    cls_scores = r[:, 4:]
+    ids = cls_scores.argmax(axis=1)
+    scores = cls_scores[np.arange(cls_scores.shape[0]), ids]
+    m = (ids == cls_id) & (scores > conf)
+    if not m.any():
+        return np.zeros((0, 4), np.float32)
+
+    boxes = _xywh2xyxy(r[m][:, :4]).astype(np.float32)
+    scale, (padx, pady) = meta
+    boxes[:, [0, 2]] -= padx
+    boxes[:, [1, 3]] -= pady
+    boxes /= scale
+    return boxes
+
+
+def is_nms_pick(ref_raw, cmp_raw, cls_id, ref_box, cmp_box, ref_score, cmp_score,
+                conf, meta) -> bool:
+    """True when both runtimes produced both boxes and NMS merely kept different ones."""
+    # Near-equal scores are what let the tie-break go either way in the first place; a
+    # real difference in confidence means these are not interchangeable candidates.
+    if abs(float(ref_score) - float(cmp_score)) > SCORE_TOL:
+        return False
+    ref_cand = class_candidates(ref_raw, cls_id, conf, meta)
+    cmp_cand = class_candidates(cmp_raw, cls_id, conf, meta)
+    if len(ref_cand) == 0 or len(cmp_cand) == 0:
+        return False
+    # Each side has to have produced the box the other side kept.
+    return (float(iou_matrix(cmp_box[None, :], ref_cand).max()) >= CANDIDATE_IOU
+            and float(iou_matrix(ref_box[None, :], cmp_cand).max()) >= CANDIDATE_IOU)
+
+
+def compare(runner, label, imgs, ref_raw, ref_dets, files, conf, iou, min_iou):
     worst = {"raw": 0.0, "raw_img": "", "box_frac": 0.0, "box_px": 0.0,
              "box_img": "", "box_side": 0.0, "score": 0.0, "min_pair_iou": 1.0}
     frac_sum, n_pairs = 0.0, 0
     near_thresh = []      # detections excused for sitting on the conf threshold
     real_unmatched = []   # detections one runtime found and the other did not
+    nms_pick = []         # same box on both sides, different NMS survivor
     low_iou = []
     shape_fail = None
 
-    for k, (x, meta) in enumerate(inputs):
+    for k, im in enumerate(imgs):
+        # Preprocessed here rather than held for every image at once: at 500 images
+        # that array alone is 2.3 GB. preprocess is deterministic (verified byte-equal
+        # across repeated calls), so every runtime still sees the identical input.
+        x, scale, pad = preprocess(im)
+        meta = (scale, pad)
         raw = runner.infer(x)
         runner.sync()
         raw = np.array(raw)   # TensorRTRunner hands back the same host buffer each call
@@ -166,10 +256,15 @@ def compare(runner, label, inputs, ref_raw, ref_dets, files, conf, iou, min_iou)
             worst["score"] = max(worst["score"], float(abs(rs[i] - cs[j])))
             pair_iou = float(iou_matrix(rb[i:i + 1], cb[j:j + 1])[0, 0])
             worst["min_pair_iou"] = min(worst["min_pair_iou"], pair_iou)
-            if pair_iou < min_iou:
-                low_iou.append(f"{files[k].name}: cls {int(rc[i])} IoU {pair_iou:.4f}, "
-                                f"off {px:.2f} px on a {side:.0f} px long side "
-                                f"({100 * frac:.2f}%)")
+            if pair_iou < min_iou and px > BOX_ABS_FLOOR_PX:
+                where = (f"{files[k].name}: cls {int(rc[i])} IoU {pair_iou:.4f}, "
+                         f"off {px:.2f} px on a {side:.0f} px long side "
+                         f"({100 * frac:.2f}%)")
+                if is_nms_pick(ref_raw[k], raw, int(rc[i]), rb[i], cb[j],
+                               rs[i], cs[j], conf, meta):
+                    nms_pick.append(where + " — both sides produced both boxes")
+                else:
+                    low_iou.append(where)
 
         for i in un_r:
             entry = f"{files[k].name}: cls {int(rc[i])} score {rs[i]:.4f} in reference only"
@@ -180,7 +275,7 @@ def compare(runner, label, inputs, ref_raw, ref_dets, files, conf, iou, min_iou)
 
     worst["mean_frac"] = frac_sum / n_pairs if n_pairs else 0.0
     worst["n_pairs"] = n_pairs
-    return worst, near_thresh, real_unmatched, low_iou, shape_fail
+    return worst, near_thresh, nms_pick, real_unmatched, low_iou, shape_fail
 
 
 def main():
@@ -217,29 +312,25 @@ def main():
     ref_runner, ref_label = build_runner(args.ref)
     print(f"[parity] reference: {ref_label}")
 
-    # Preprocess once and hand every runtime the identical array. Preprocessing per
-    # runtime would let a difference in common.preprocess hide inside what is meant to
-    # measure the export alone.
-    inputs = []
-    for im in imgs:
-        x, r, pad = preprocess(im)
-        inputs.append((x, (r, pad)))
-
+    # The reference raw output is kept for every image — the comparison needs it, and
+    # so does the candidate check when a pair disagrees. The preprocessed inputs are
+    # not kept; see the note in compare().
     ref_raw, ref_dets = [], []
-    for x, meta in inputs:
+    for im in imgs:
+        x, scale, pad = preprocess(im)
         raw = ref_runner.infer(x)
         ref_runner.sync()
         raw = np.array(raw)
         ref_raw.append(raw)
-        ref_dets.append(postprocess(raw, meta, args.conf, args.iou))
+        ref_dets.append(postprocess(raw, (scale, pad), args.conf, args.iou))
     print(f"[parity] reference found {sum(len(d[0]) for d in ref_dets)} detections "
           f"over {len(imgs)} images\n")
 
     failures = []
     for spec in cmp_specs:
         runner, label = build_runner(spec)
-        worst, near_thresh, real_unmatched, low_iou, shape_fail = compare(
-            runner, label, inputs, ref_raw, ref_dets, files, args.conf, args.iou,
+        worst, near_thresh, nms_pick, real_unmatched, low_iou, shape_fail = compare(
+            runner, label, imgs, ref_raw, ref_dets, files, args.conf, args.iou,
             args.min_iou)
 
         ok = (not shape_fail and not real_unmatched and not low_iou
@@ -259,8 +350,9 @@ def main():
             print(f"        raw max|Δ|       {worst['raw']:.4f} "
                   f"(over all 8400 anchors, not gated)")
             print(f"        on the threshold {len(near_thresh)} (allowed)")
+            print(f"        NMS pick differs {len(nms_pick)} (allowed)")
             print(f"        disagreements    {len(real_unmatched)}")
-        for e in near_thresh:
+        for e in near_thresh + nms_pick:
             print(f"          ~ {e}")
         for e in real_unmatched + low_iou:
             print(f"          ! {e}")

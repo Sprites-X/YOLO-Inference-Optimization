@@ -32,8 +32,12 @@ python build_engine.py --onnx yolov8n.onnx --precision int8 \
 # produces perfectly reasonable-looking latency numbers, so this has to run before any
 # measurement, not after. INT8 is left out on purpose — quantization is meant to move
 # boxes, so it is judged on mAP below rather than against FP32 geometry.
+#
+# Over all 500, not a sample: at 100 the run passed while missing every case where the
+# two runtimes keep a different NMS survivor, which only showed up past image 100.
+# Takes about 30s for the four runtimes and peaks around 3.8 GB.
 echo "=== export parity ==="
-python check_parity.py --images $IMAGES --n 100 \
+python check_parity.py --images $IMAGES --n 500 \
     --cmp onnx:yolov8n.onnx:cuda \
     --cmp onnx:yolov8n_dyn.onnx:cuda \
     --cmp onnx:yolov8n.onnx:cpu \

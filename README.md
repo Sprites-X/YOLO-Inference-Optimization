@@ -49,19 +49,34 @@ requires.
   and 0.46 px for boxes over 500 px, while mean *relative* delta runs the other way —
   0.38% against 0.08%. A per-box rule in pixels and one in percent fail at opposite
   ends.
-- *NMS is a discrete choice.* On `000000097585.jpg` the two best candidates for one
-  object score 0.75133 and 0.74966 in FP32. FP16 rounds both to exactly 0.75049, the
-  tie-break then keeps the other one, and the surviving box moves 6.6 px. The same
-  object is found either way.
+- *NMS keeps one box out of several.* Where an object has near-duplicate candidates the
+  scores deciding which survives can differ in the fourth decimal, so the two runtimes
+  keep different, equally valid boxes. On `000000394206.jpg` PyTorch keeps one scoring
+  0.46719 and TensorRT one scoring 0.46680, 47 px apart on a 230 px box. Comparing kept
+  box against kept box is ill-posed here at any threshold.
 
-So the check asks whether both runtimes found the same objects, not whether they agree
-bit for bit: every detection must pair with one of the same class at IoU >= 0.90, mean
-box drift must stay under 0.5% of box size — that is what catches a systematic shift,
-which per-box IoU on its own would miss — and scores must agree within 0.02.
-Detections within 0.05 of the confidence threshold may appear on one side only: at conf
-0.25, a box scoring 0.2510 on one runtime and 0.2498 on the other is the threshold
-being stepped over, not a detection being lost. Two of those turn up across 100 images,
-and the check prints them rather than hiding them.
+So the check asks whether both runtimes found the same objects. Every detection has to
+pair with one of the same class at IoU >= 0.90 *or* land within 2 px of it, scores must
+agree within 0.02, and mean box drift must stay under 0.5% of box size — that last one
+catches a systematic shift that per-box IoU would let through. The 2 px alternative is
+there because IoU is hypersensitive on small boxes: 1.14 px of disagreement on a 28 px
+box is already IoU 0.9093, and that is the worst pair ONNX FP32 produces against
+PyTorch FP32, two runtimes that are numerically all but identical. Two kinds of disagreement are allowed, and printed
+rather than hidden:
+
+- A detection within 0.05 of the confidence threshold may appear on one side only. At
+  conf 0.25 a box scoring 0.2510 against 0.2498 is the threshold being stepped over,
+  not a detection being lost. 10 of these across the 500 images.
+- A pair below 0.90 IoU is re-checked against the boxes each runtime produced *before*
+  NMS ran. If both sides produced both boxes, only the tie-break differed. 4 of these,
+  between 0.79 and 0.88 IoU, each matching the other side's candidates at 0.988 or
+  better.
+
+Both gates were checked by perturbing a working engine rather than taken on trust.
+Shifting every box 1 px sideways and widening every box by 2% are both caught, at
+1.338% and 0.864% mean drift, and in both cases no individual pair trips the per-box
+gate at all — without the mean, both would pass. Larger errors trip everything: a 10 px
+shift fails on drift, on 298 pairs, and on 153 detections that stop matching entirely.
 
 ## Verified environment
 Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /

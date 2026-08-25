@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import hashlib
 import json
 import os
@@ -25,6 +24,12 @@ from common import IMG_SIZE, preprocess
 
 TRT_LOGGER = trt.Logger(trt.Logger.INFO)
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
+
+# yolov8's detect head is module 22, and TensorRT keeps the node names the ONNX carried,
+# so the whole head is addressable by prefix. Counted on yolov8n.onnx: 73 of 299 layers
+# match, spanning index 138 to 298, and they include all 19 convolutions in the head —
+# the cv2.* box branch, the cv3.* class branch, and the DFL conv at 230.
+HEAD_PREFIX = "/model.22/"
 
 
 def _check(err):
@@ -245,6 +250,13 @@ def build(args):
             print("[net] ONNX is static batch — --max-batch has no effect "
                   "(re-export with dynamic=True to test batching)")
 
+    if args.fp16_head and args.precision != "int8":
+        raise SystemExit(
+            f"--fp16-head does nothing for --precision {args.precision}\n"
+            f"it exists to take the detect head back out of INT8; an fp16 build already "
+            f"has the head in FP16, and an fp32 build has it in FP32"
+        )
+
     calibrator = None
     if args.precision == "fp16":
         if not builder.platform_has_fast_fp16:
@@ -301,11 +313,14 @@ def build(args):
         config.int8_calibrator = calibrator
 
         if args.fp16_head:
-            _force_fp16_output_layers(network, config, n=args.fp16_head)
+            _force_fp16_head(network, config)
 
-    out = args.engine or str(
-        Path(args.onnx).with_suffix("").name + f"_{args.precision}.engine"
-    )
+    # The name carries _fp16head as well as the precision, because an INT8 engine with
+    # the head pinned is a different engine from one without and the two are meant to be
+    # compared. Sharing a filename would have the second build overwrite the first.
+    # benchmark.py still reads INT8 off this, since it checks for int8 before fp16.
+    tag = f"_{args.precision}" + ("_fp16head" if args.fp16_head else "")
+    out = args.engine or str(Path(args.onnx).with_suffix("").name + tag + ".engine")
 
     # The filename has to carry _fp16/_int8, because benchmark.py reads precision off
     # it (TensorRTRunner._detect_precision) — an engine does not report its own.
@@ -326,38 +341,72 @@ def build(args):
     print("[note] this engine is tied to this GPU and this TensorRT version — rebuild on another machine")
 
 
-def _force_fp16_output_layers(network, config, n: int = 10):
-    # For when INT8 costs too much mAP: the detect head does box regression, which is
-    # more sensitive to quantization than ordinary conv layers. Pinning the last few
-    # layers to FP16 usually wins the mAP back for little speed.
-    #
-    # OBEY_PRECISION_CONSTRAINTS makes the build fail outright if it cannot honour what
-    # was asked, which beats TRT quietly picking another precision while we believe the
-    # constraint took.
-    #
-    # TODO: never actually run. Two things to check on first use:
-    #   1. set_output_type(float16) on the last layers may make the engine emit FP16
-    #      output → common.postprocess would de-letterbox in float16 and boxes land
-    #      ~1 px off (see the NOTE at the end of common.postprocess). If so, cast
-    #      before postprocess.
-    #   2. n=10 is a guess; how many layers yolov8n's detect head actually spans is
-    #      still unknown.
+def _force_fp16_head(network, config, prefix: str = HEAD_PREFIX) -> int:
+    """Pin the detect head to FP16. For when INT8 costs too much mAP.
+
+    The head regresses coordinates, which needs finer resolution than class scores do,
+    so it is the first thing worth taking back out of INT8.
+
+    Layers are selected by name, not by counting back from the end of the network. The
+    previous version took the last n layers, and on this model that is the box *decode*
+    arithmetic — Add/Sub/Div/Mul over values the convolutions already produced. At the
+    documented n=10 it pinned six elementwise ops and reached no convolution at all;
+    the last conv in the head sits at index 230 of 299, so counting back would have to
+    reach n=69 before touching one. It could never have done what it was for.
+
+    OBEY_PRECISION_CONSTRAINTS makes the build fail outright if TensorRT cannot honour
+    what was asked, which beats it quietly choosing another precision while we believe
+    the constraint took.
+
+    Measured on yolov8n over the 500-image set, calibrated on 500 train2017 images:
+    INT8 alone scores mAP50-95 0.2898 against the FP32 baseline's 0.4008, and pinning
+    the head brings it to 0.3519 — a bit over half the loss recovered, for 51 layers out
+    of 299 left in FP16.
+    """
     config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
-    total = network.num_layers
-    count = 0
-    for i in range(max(0, total - n), total):
+
+    # Never retype a tensor the engine hands back. common.postprocess de-letterboxes in
+    # whatever dtype reaches it, and in float16 that puts boxes about 1 px out on a
+    # 1080p frame. On yolov8n this guard never fires — the head ends in a concatenation,
+    # which the skip list below already excludes, and all three engines were checked to
+    # emit FLOAT. It is here for the model or skip list that does not end that way.
+    net_outputs = {network.get_output(i).name for i in range(network.num_outputs)}
+
+    forced = kept_fp32_out = 0
+    for i in range(network.num_layers):
         layer = network.get_layer(i)
-        # Skip layers that work on shapes and indices rather than values. Forcing
-        # those to FP16 gains nothing and often fails the build under
-        # OBEY_PRECISION_CONSTRAINTS.
+        if prefix not in layer.name:
+            continue
+        # Layers that work on shapes and indices rather than values: forcing those to
+        # FP16 gains nothing and often fails the build under OBEY_PRECISION_CONSTRAINTS.
         if layer.type in (trt.LayerType.SHAPE, trt.LayerType.CONSTANT,
-                          trt.LayerType.CONCATENATION, trt.LayerType.GATHER):
+                          trt.LayerType.CONCATENATION, trt.LayerType.GATHER,
+                          trt.LayerType.SLICE, trt.LayerType.SHUFFLE):
             continue
         layer.precision = trt.float16
         for j in range(layer.num_outputs):
+            if layer.get_output(j).name in net_outputs:
+                kept_fp32_out += 1
+                continue
             layer.set_output_type(j, trt.float16)
-        count += 1
-    print(f"[mixed] forced the last {count} layers ({total} total) to FP16")
+        forced += 1
+
+    msg = (f"[mixed] pinned {forced} '{prefix}' layers to FP16 "
+           f"({network.num_layers} in the network)")
+    # Only claimed when it actually happened. On yolov8n the head's last layer is a
+    # concatenation, which is skipped anyway, so nothing needs holding back — but a
+    # model whose head ends in a compute layer would, and the engine has to keep
+    # returning FP32 either way.
+    if kept_fp32_out:
+        msg += f", holding {kept_fp32_out} network output(s) at FP32"
+    print(msg)
+    if forced == 0:
+        raise SystemExit(
+            f"--fp16-head matched no layers on '{prefix}'\n"
+            f"TensorRT takes layer names from the ONNX, so a different model or a "
+            f"re-export that renames modules needs a different prefix"
+        )
+    return forced
 
 
 def main():
@@ -382,8 +431,9 @@ def main():
     ap.add_argument("--calib-num", type=int, default=500)
     # Always clamped down to the engine's max batch in build(); reasoning is there.
     ap.add_argument("--calib-batch", type=int, default=8)
-    ap.add_argument("--fp16-head", type=int, default=0,
-                    help="how many trailing layers to pin to FP16 (try when INT8 costs too much mAP)")
+    # Was a layer count, which selected the wrong layers entirely — see _force_fp16_head.
+    ap.add_argument("--fp16-head", action="store_true",
+                    help="pin the detect head to FP16 (INT8 only, when INT8 costs too much mAP)")
     build(ap.parse_args())
 
 

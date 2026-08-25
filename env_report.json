@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-24T03:41:36.484509+00:00",
+  "checked_at": "2026-08-25T07:27:21.565721+00:00",
   "checks": {
     "PYTHONPATH clean": {
       "status": "pass",
@@ -7,7 +7,7 @@
     },
     "nvidia-smi": {
       "status": "pass",
-      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 36 | 145.00 W | 3090 MHz"
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 39 | 145.00 W | 3090 MHz"
     },
     "driver >= 570": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul succeeded (checksum 12673.8)"
+      "detail": "matmul succeeded (checksum -20542.0)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -35,7 +35,7 @@
     },
     "ORT really on CUDA": {
       "status": "pass",
-      "detail": "['CUDAExecutionProvider', 'CPUExecutionProvider']"
+      "detail": "['CUDAExecutionProvider', 'CPUExecutionProvider'] (no torch in that process)"
     },
     "tensorrt >= 10.8": {
       "status": "pass",

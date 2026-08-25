@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import statistics
 import subprocess
@@ -66,6 +67,52 @@ def cpu_governor() -> str | None:
     if not govs:
         return None
     return govs.pop() if len(govs) == 1 else "mixed:" + ",".join(sorted(govs))
+
+
+# ONNX Runtime's CUDA provider links libcublasLt/libcublas/libcurand/libcufft/
+# libcudart/libcudnn by soname, but pip puts them under site-packages/nvidia/*/lib,
+# which the dynamic loader does not search. Loading the provider then fails with
+# "libcublasLt.so.12: cannot open shared object file" and ORT quietly drops to CPU.
+#
+# It works anyway whenever torch was imported first, because torch dlopens the same
+# files with RTLD_GLOBAL on its way in. That made the failure look like it depended on
+# the script rather than the environment: verify_env.py checks torch before ORT and
+# passed, check_parity.py builds the PyTorch reference first and passed, while
+# `evaluate.py --runtime onnx --device cuda` — which never imports torch — could not
+# get a CUDA session at all.
+#
+# Deliberately not LD_LIBRARY_PATH: pointing that at these directories shadows the
+# TensorRT .so files that `import tensorrt` resolves from inside its own package, and
+# trades a broken ONNX row for broken TensorRT rows.
+#
+# Ordered so each library is loaded before the ones that link against it.
+_ORT_CUDA_DEPS = ("libcudart.so.12", "libcublasLt.so.12", "libcublas.so.12",
+                  "libcudnn.so.9", "libcurand.so.10", "libcufft.so.11")
+
+
+def preload_ort_cuda_deps() -> list[str]:
+    """dlopen ORT's CUDA dependencies from the nvidia pip packages. Returns what loaded."""
+    try:
+        import nvidia
+    except ImportError:
+        return []      # CUDA libs installed system-wide; the loader can find them itself
+
+    root = Path(nvidia.__file__).parent
+    loaded = []
+    for soname in _ORT_CUDA_DEPS:
+        cand = next(iter(sorted(root.glob(f"*/lib/{soname}"))), None)
+        if cand is None:
+            continue
+        try:
+            # RTLD_GLOBAL so the provider .so resolves against these once ORT dlopens
+            # it; the default RTLD_LOCAL would keep them private to this module.
+            ctypes.CDLL(str(cand), mode=ctypes.RTLD_GLOBAL)
+            loaded.append(cand.name)
+        except OSError:
+            # Not fatal here: whatever is missing surfaces as ONNXRunner refusing to
+            # hand back a CUDA session, which is the error worth reading.
+            pass
+    return loaded
 
 
 # ==========================================================================
@@ -141,6 +188,8 @@ class ONNXRunner:
     precision = "FP32"
 
     def __init__(self, model_path: str, device: str):
+        if device == "cuda":
+            preload_ort_cuda_deps()
         import onnxruntime as ort
 
         providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]

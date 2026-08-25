@@ -3,8 +3,9 @@
 Benchmarking YOLOv8n across PyTorch / ONNX Runtime /
 TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
 
-**Status:** PyTorch baseline measured on 500 COCO val2017 images.
-ONNX export, TensorRT and INT8 still to come.
+**Status:** PyTorch baseline measured on 500 COCO val2017 images. ONNX (static and
+dynamic) and TensorRT FP16 exported and checked against that baseline. INT8 and the
+latency comparison still to come.
 
 ## Baseline (YOLOv8n, 640x640, batch 1)
 
@@ -23,10 +24,56 @@ mAP is measured at conf 0.001 / IoU 0.7 as COCO AP requires; the latency rows us
 deploy thresholds (0.25 / 0.45) — see `common.py` for why these differ on
 purpose.
 
+## Export parity
+
+Every export is checked against the PyTorch model it came from before any speed is
+measured, because an export that quietly changed the model still produces perfectly
+plausible latency numbers. `check_parity.py` runs the same images through each runtime
+and compares detections, and `run_all.sh` stops the run if they disagree.
+
+| Runtime | Precision | mAP50-95 | mAP50 | vs baseline |
+|---|---|---|---|---|
+| PyTorch (baseline) | FP32 | 0.4008 | 0.5476 | — |
+| ONNX Runtime GPU | FP32 | 0.4008 | 0.5475 | 0.0000 |
+| ONNX Runtime CPU | FP32 | 0.4008 | 0.5476 | 0.0000 |
+| TensorRT | FP16 | 0.4003 | 0.5480 | -0.0005 |
+
+Same 500 images, same `common.py` pre/postprocess, conf 0.001 / IoU 0.7 as COCO AP
+requires.
+
+**The gate is not a pixel tolerance.** Two things make FP16 detections differ from FP32
+without anything being wrong with the export:
+
+- *Box error scales with box size.* yolov8 decodes a box by summing 16 DFL bins scaled
+  by the stride of the level it came from, so the ~3 decimal digits FP16 carries cost
+  more on a large box than a small one — 5.4 px on a 608 px box against 1.1 px on a
+  232 px box, the same small relative error. A flat pixel budget either fails the first
+  or waves the second through.
+- *NMS is a discrete choice.* On `000000097585.jpg` the two best candidates for one
+  object score 0.75133 and 0.74966 in FP32. FP16 rounds both to exactly 0.75049, the
+  tie-break then keeps the other one, and the surviving box moves 6.6 px. The same
+  object is found either way.
+
+So the check asks whether both runtimes found the same objects, not whether they agree
+bit for bit: every detection must pair with one of the same class at IoU >= 0.90, mean
+box drift must stay under 0.5% of box size — that is what catches a systematic shift,
+which per-box IoU on its own would miss — and scores must agree within 0.02.
+Detections within 0.05 of the confidence threshold may appear on one side only: at conf
+0.25, a box scoring 0.2510 on one runtime and 0.2498 on the other is the threshold
+being stepped over, not a detection being lost. Two of those turn up across 100 images,
+and the check prints them rather than hiding them.
+
 ## Verified environment
 Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /
 TensorRT 10.16.1.11 / Python 3.10.12.
 Full detail in `env_report.json`, exact packages in `requirements.lock.txt`.
+
+ONNX Runtime's CUDA provider links libraries that pip installs under
+`site-packages/nvidia/*/lib`, where the dynamic loader does not look, so `benchmark.py`
+dlopens them before opening a session. Without that, ORT found CUDA only when torch had
+been imported first — which `verify_env.py` did, so it reported PASS while
+`evaluate.py --runtime onnx --device cuda` could not get a GPU session at all. That
+check now runs in a subprocess with no torch in it.
 
 ## What's here
 
@@ -39,6 +86,7 @@ the order it runs them:
 | `prepare_data.py` | Deterministic 500-image measurement set from val2017. |
 | `fetch_train_pool.py` | Pulls the train2017 pool used for INT8 calibration. |
 | `build_engine.py` | TensorRT 10 builder, with a real INT8 calibrator and a fingerprinted calibration cache. |
+| `check_parity.py` | The gate between export and measurement. Same images through every runtime, detections compared against PyTorch. |
 | `benchmark.py` | Latency: warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs. Appends to `results.jsonl`. |
 | `evaluate.py` | Accuracy: COCO mAP via pycocotools. Appends to `accuracy.jsonl`. |
 | `make_report.py` | Joins those two files into `report_table.md` and the figures. |

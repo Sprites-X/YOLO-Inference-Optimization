@@ -150,38 +150,79 @@ def check_onnxruntime():
         fail("CUDAExecutionProvider in build", "this wheel is CPU-only — install onnxruntime-gpu")
         return
  
+    # Run the session test in a subprocess that never imports torch.
+    #
+    # It used to run here, and passed — but only because check_torch() runs first and
+    # torch dlopens ORT's CUDA dependencies (libcublasLt and friends, which pip leaves
+    # in site-packages/nvidia/*/lib where the loader does not look) with RTLD_GLOBAL on
+    # the way in. So this reported "ORT really on CUDA" while
+    # `evaluate.py --runtime onnx --device cuda` could not get a CUDA session at all.
+    # A gate that only passes because of what another check imported first is not
+    # testing the machine.
+    #
+    # benchmark.preload_ort_cuda_deps() is what the ONNX runner itself calls, so this
+    # checks the real path: no torch, ORT's libraries loaded the way production loads
+    # them.
     try:
-        import numpy as np
-        from onnx import TensorProto, helper
- 
-        node = helper.make_node("Add", ["x", "y"], ["z"])
-        graph = helper.make_graph(
-            [node], "t",
-            [helper.make_tensor_value_info("x", TensorProto.FLOAT, [64, 64]),
-             helper.make_tensor_value_info("y", TensorProto.FLOAT, [64, 64])],
-            [helper.make_tensor_value_info("z", TensorProto.FLOAT, [64, 64])],
-        )
-        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-        # Pin ir_version to 9: an onnx package newer than ORT can write an ir_version
-        # the installed ORT does not support, and the smoke test would then fail for
-        # the wrong reason.
-        model.ir_version = 9
- 
-        # Ask for CUDAExecutionProvider alone, with no CPU fallback listed. Include CPU
-        # and ORT quietly falls back to it, and this check passes when it should fail.
-        sess = ort.InferenceSession(
-            model.SerializeToString(), providers=["CUDAExecutionProvider"]
-        )
-        used = sess.get_providers()
-        if "CUDAExecutionProvider" in used:
-            x = np.ones((64, 64), np.float32)
-            sess.run(None, {"x": x, "y": x})
-            ok("ORT really on CUDA", str(used))
-        else:
-            fail("ORT really on CUDA",
-                 f"fell back to {used} — the 'ONNX Runtime GPU' row would be CPU numbers")
+        r = subprocess.run([sys.executable, "-c", SUBPROCESS_ORT_PROBE], capture_output=True,
+                           text=True, timeout=180,
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        line = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
     except Exception as e:
         fail("ORT smoke test", str(e).split("\n")[0])
+        return
+ 
+    if line.startswith("CUDA-OK"):
+        ok("ORT really on CUDA", line[len("CUDA-OK "):] + " (no torch in that process)")
+    elif line.startswith("CUDA-NO"):
+        fail("ORT really on CUDA",
+             f"fell back to {line[len('CUDA-NO '):]} — the 'ONNX Runtime GPU' row would be CPU numbers")
+    else:
+        fail("ORT smoke test", (r.stderr.strip().splitlines() or ["no output"])[-1][:200])
+ 
+ 
+# Kept as source text rather than a function because it has to run in a process where
+# torch was never imported; anything importing this module would drag torch in through
+# the runners.
+SUBPROCESS_ORT_PROBE = r"""
+import sys
+
+import numpy as np
+from onnx import TensorProto, helper
+
+from benchmark import preload_ort_cuda_deps
+
+preload_ort_cuda_deps()
+import onnxruntime as ort
+
+# The whole point of this process: prove ORT finds CUDA on its own, without torch
+# having dlopened its dependencies first.
+assert "torch" not in sys.modules, "torch got imported — this probe would prove nothing"
+
+node = helper.make_node("Add", ["x", "y"], ["z"])
+graph = helper.make_graph(
+    [node], "t",
+    [helper.make_tensor_value_info("x", TensorProto.FLOAT, [64, 64]),
+     helper.make_tensor_value_info("y", TensorProto.FLOAT, [64, 64])],
+    [helper.make_tensor_value_info("z", TensorProto.FLOAT, [64, 64])],
+)
+model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+# Pin ir_version to 9: an onnx package newer than ORT can write an ir_version the
+# installed ORT does not support, and the smoke test would then fail for the wrong
+# reason.
+model.ir_version = 9
+
+# Ask for CUDAExecutionProvider alone, with no CPU fallback listed. Include CPU and ORT
+# quietly falls back to it, and this check passes when it should fail.
+sess = ort.InferenceSession(model.SerializeToString(), providers=["CUDAExecutionProvider"])
+used = sess.get_providers()
+if "CUDAExecutionProvider" in used:
+    x = np.ones((64, 64), np.float32)
+    sess.run(None, {"x": x, "y": x})
+    print("CUDA-OK", used)
+else:
+    print("CUDA-NO", used)
+"""
  
  
 def check_tensorrt():

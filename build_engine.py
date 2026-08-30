@@ -228,6 +228,14 @@ def build(args):
     # from this line for every precision, before even reaching calibration.)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, args.workspace << 30)
 
+    # Off by default. At the default verbosity the engine keeps layer *names* only, and
+    # the compiler backend has already rewritten those to things like __mye48100_myl0_0,
+    # so an inspector dump says nothing about precision or tactic. DETAILED keeps the
+    # rest, at the cost of a larger engine — a diagnosis switch, not a build setting.
+    if args.detailed_layers:
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        print("[build] DETAILED profiling verbosity — engine carries full layer info")
+
     inp = network.get_input(0)
     print(f"[net] input '{inp.name}' shape={inp.shape}")
 
@@ -250,11 +258,16 @@ def build(args):
             print("[net] ONNX is static batch — --max-batch has no effect "
                   "(re-export with dynamic=True to test batching)")
 
-    if args.fp16_head and args.precision != "int8":
+    # Resolved once here so the build and the engine name cannot disagree about what
+    # was pinned. --fp16-head is the shorthand the results in the README were built with.
+    pin_prefixes = tuple(args.fp16_prefix or ())
+    if args.fp16_head:
+        pin_prefixes = (HEAD_PREFIX,) + pin_prefixes
+    if pin_prefixes and args.precision != "int8":
         raise SystemExit(
-            f"--fp16-head does nothing for --precision {args.precision}\n"
-            f"it exists to take the detect head back out of INT8; an fp16 build already "
-            f"has the head in FP16, and an fp32 build has it in FP32"
+            f"--fp16-head/--fp16-prefix does nothing for --precision {args.precision}\n"
+            f"they exist to take layers back out of INT8; an fp16 build already "
+            f"has them in FP16, and an fp32 build has them in FP32"
         )
 
     calibrator = None
@@ -322,14 +335,24 @@ def build(args):
         )
         config.int8_calibrator = calibrator
 
-        if args.fp16_head:
-            _force_fp16_head(network, config)
+        if pin_prefixes:
+            _force_fp16_layers(network, config, pin_prefixes)
 
     # The name carries _fp16head as well as the precision, because an INT8 engine with
     # the head pinned is a different engine from one without and the two are meant to be
     # compared. Sharing a filename would have the second build overwrite the first.
     # benchmark.py still reads INT8 off this, since it checks for int8 before fp16.
-    tag = f"_{args.precision}" + ("_fp16head" if args.fp16_head else "")
+    # _fp16head stays the name for the head shorthand, because run_all.sh and the README
+    # refer to that file. Sweep builds get a name off their prefixes instead, so twenty
+    # of them in a row do not all land on one filename.
+    if args.fp16_head and not args.fp16_prefix:
+        pin_tag = "_fp16head"
+    elif pin_prefixes:
+        pin_tag = "_fp16" + "-".join(
+            pre.strip("/").replace("model.", "m").replace("/", "_") for pre in pin_prefixes)
+    else:
+        pin_tag = ""
+    tag = f"_{args.precision}" + pin_tag
     out = args.engine or str(Path(args.onnx).with_suffix("").name + tag + ".engine")
 
     # The filename has to carry _fp16/_int8, because benchmark.py reads precision off
@@ -351,11 +374,15 @@ def build(args):
     print("[note] this engine is tied to this GPU and this TensorRT version — rebuild on another machine")
 
 
-def _force_fp16_head(network, config, prefix: str = HEAD_PREFIX) -> int:
-    """Pin the detect head to FP16. For when INT8 costs too much mAP.
+def _force_fp16_layers(network, config, prefixes=(HEAD_PREFIX,)) -> int:
+    """Pin every layer whose name contains one of `prefixes` to FP16.
 
-    The head regresses coordinates, which needs finer resolution than class scores do,
-    so it is the first thing worth taking back out of INT8.
+    Defaults to the detect head, which is what this was written for: the head regresses
+    coordinates, which needs finer resolution than class scores do, so it is the first
+    thing worth taking back out of INT8. Arbitrary prefixes are reachable from
+    --fp16-prefix, which is how the per-block sensitivity sweep is run — pin one
+    `/model.N/` block at a time and the mAP delta is that block's share of the INT8
+    loss.
 
     Layers are selected by name, not by counting back from the end of the network. The
     previous version took the last n layers, and on this model that is the box *decode*
@@ -385,7 +412,7 @@ def _force_fp16_head(network, config, prefix: str = HEAD_PREFIX) -> int:
     forced = kept_fp32_out = 0
     for i in range(network.num_layers):
         layer = network.get_layer(i)
-        if prefix not in layer.name:
+        if not any(pre in layer.name for pre in prefixes):
             continue
         # Layers that work on shapes and indices rather than values: forcing those to
         # FP16 gains nothing and often fails the build under OBEY_PRECISION_CONSTRAINTS.
@@ -401,7 +428,7 @@ def _force_fp16_head(network, config, prefix: str = HEAD_PREFIX) -> int:
             layer.set_output_type(j, trt.float16)
         forced += 1
 
-    msg = (f"[mixed] pinned {forced} '{prefix}' layers to FP16 "
+    msg = (f"[mixed] pinned {forced} {'/'.join(prefixes)} layers to FP16 "
            f"({network.num_layers} in the network)")
     # Only claimed when it actually happened. On yolov8n the head's last layer is a
     # concatenation, which is skipped anyway, so nothing needs holding back — but a
@@ -412,9 +439,10 @@ def _force_fp16_head(network, config, prefix: str = HEAD_PREFIX) -> int:
     print(msg)
     if forced == 0:
         raise SystemExit(
-            f"--fp16-head matched no layers on '{prefix}'\n"
+            f"matched no layers on {'/'.join(prefixes)}\n"
             f"TensorRT takes layer names from the ONNX, so a different model or a "
-            f"re-export that renames modules needs a different prefix"
+            f"re-export that renames modules needs a different prefix. A block that is "
+            f"only concat/upsample also lands here — it has no layer worth pinning."
         )
     return forced
 
@@ -441,9 +469,16 @@ def main():
     ap.add_argument("--calib-num", type=int, default=500)
     # Always clamped down to the engine's max batch in build(); reasoning is there.
     ap.add_argument("--calib-batch", type=int, default=8)
-    # Was a layer count, which selected the wrong layers entirely — see _force_fp16_head.
+    # Was a layer count, which selected the wrong layers entirely — see _force_fp16_layers.
     ap.add_argument("--fp16-head", action="store_true",
                     help="pin the detect head to FP16 (INT8 only, when INT8 costs too much mAP)")
+    # The sweep handle: --fp16-prefix /model.4/ leaves that block in FP16 and everything
+    # else in INT8, so the mAP delta against a plain INT8 build is that block's share of
+    # the loss. Repeatable, because the useful follow-up is pinning the worst few together.
+    ap.add_argument("--fp16-prefix", action="append", default=None, metavar="PREFIX",
+                    help="pin layers whose name contains PREFIX to FP16 (INT8 only, repeatable)")
+    ap.add_argument("--detailed-layers", action="store_true",
+                    help="keep full per-layer info in the engine for inspection (larger engine)")
     build(ap.parse_args())
 
 

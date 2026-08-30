@@ -4,8 +4,11 @@ Benchmarking YOLOv8n across PyTorch / ONNX Runtime /
 TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
 
 **Status:** PyTorch baseline measured on 500 COCO val2017 images. ONNX (static and
-dynamic) and TensorRT FP16 exported and checked against that baseline. INT8 and the
-latency comparison still to come.
+dynamic) and TensorRT FP16 exported and checked against that baseline. INT8 built,
+scored, and measured across batch 1/8/16 — on this card it is slower than FP16 as well
+as less accurate at every batch size, so FP16 is the configuration to use; see
+[INT8: what it costs](#int8-what-it-costs). The full latency table across all runtimes
+is still to come.
 
 ## Baseline (YOLOv8n, 640x640, batch 1)
 
@@ -78,6 +81,135 @@ Shifting every box 1 px sideways and widening every box by 2% are both caught, a
 gate at all — without the mean, both would pass. Larger errors trip everything: a 10 px
 shift fails on drift, on 298 pairs, and on 153 detections that stop matching entirely.
 
+**INT8 is reported here but not gated,** and that is a measured conclusion rather than
+an exemption. Running the same perturbation test against a clean INT8 engine:
+
+| perturbation | mean drift | pairs failing per-box | unmatched |
+|---|---|---|---|
+| none | 6.046% | 854 | 689 |
+| x shifted 1 px | 6.216% | 932 | 689 |
+| x shifted 3 px | 7.189% | 1258 | 709 |
+| width x1.02 | **5.931%** | 809 | 689 |
+| width x1.10 | 6.536% | 1102 | 693 |
+
+Where FP16 moves 5.6x on a 1 px shift, INT8 moves 1.03x — and a 2% widening lands
+*below* the clean engine, because the quantization noise is larger than the error and
+partly cancels it. The unmatched column is identical to the detection across three rows.
+No threshold separates a good INT8 engine from a bent one, so any number chosen here
+would either fail working engines or pass broken ones. These engines report `UNGATED`
+with their drift printed, a mismatched output shape still fails, and mAP — where a 3 px
+shift is obvious — is what actually judges them.
+
+## INT8: what it costs
+
+On this GPU, **INT8 is slower than FP16 as well as less accurate, at every batch size
+measured**, so it is dominated outright. Timings are `trtexec --noDataTransfers`, which
+isolates GPU compute from the host transfers that otherwise mask the difference;
+throughput is per image, so batched rows are comparable to batch 1.
+
+| Engine | batch | median | img/s | vs FP16 | mAP50-95 |
+|---|---|---|---|---|---|
+| FP16, static shape | 1 | 0.540 ms | 1841 | — | 0.4003 |
+| INT8, static shape | 1 | 1.110 ms | 894 | **0.49x** | 0.3136 |
+| FP16, dynamic shape | 1 | 0.778 ms | 1277 | — | 0.4004 |
+| INT8, dynamic shape | 1 | 0.970 ms | 1025 | **0.80x** | 0.3135 |
+| FP16, dynamic shape | 8 | 3.152 ms | 2468 | — | — |
+| INT8, dynamic shape | 8 | 4.675 ms | 1692 | **0.69x** | — |
+| FP16, dynamic shape | 16 | 7.132 ms | 2226 | — | — |
+| INT8, dynamic shape | 16 | 10.445 ms | 1525 | **0.69x** | — |
+
+Batching was the test that could have rescued INT8: yolov8n at batch 1 is small enough
+to be bound by kernel launches and memory rather than compute, which is the regime where
+INT8 has nothing to win with. It does not rescue it — INT8's best showing anywhere is
+0.80x of FP16. There is no reason here to pick a config that is slower *and* 22% less
+accurate.
+
+Batching does help FP16, from 1841 to 2468 img/s, and batch 16 is worse than batch 8
+(2226), so the useful operating point on this card is around batch 8.
+
+### Why INT8 is slower
+
+Rebuilt with `--detailed-layers` (`ProfilingVerbosity.DETAILED`, off by default because
+it inflates the engine) so `trtexec --dumpProfile` reports real layer names instead of
+`__mye48100_myl0_0`. Grouping each layer by the work it does — names like
+`__myl_SiluCastMulMinMaxRounCast` are a quantize step fused whole: scale, clamp, round,
+cast:
+
+| | static INT8 | dynamic INT8 | static FP16 |
+|---|---|---|---|
+| convolution | 539 us | 639 us | **517 us** |
+| quantize / dequantize | **721 us** | 452 us | **none** |
+| reshape / move / concat | 393 us | 168 us | 86 us |
+| other (mostly SiLU) | 58 us | 38 us | 279 us |
+
+The first row is the whole story: **INT8's convolutions are not faster than FP16's** —
+539 us against 517 us, 4% slower, and convolution is the only thing INT8 exists to
+speed up. With nothing gained there, what remains is cost: 721 us of quantize work that
+FP16 does not do at all, plus 307 us more data movement.
+
+That is consistent with the shape of this model rather than with anything going wrong.
+yolov8n at 640x640 batch 1 runs convolutions of 16–256 channels, which are bound by
+memory rather than arithmetic, so halving the width of the arithmetic buys nothing while
+still requiring a conversion around every layer.
+
+Treat these numbers as a breakdown of *where the work is*, not as a latency budget:
+profiling adds its own overhead (static INT8 reports 1.716 ms here against 1.110 ms in a
+clean run), and with auxiliary streams in play the per-layer sum is not a serial
+timeline.
+
+**Why the static INT8 engine is 10x the size and slower.** Not the number of compiled
+kernels — 126 against the dynamic build's 100 — but their size, averaging 0.44 MB
+against 0.058 MB. With static shapes Myelin fuses far more aggressively and then fans
+the result across **6 CUDA streams with 47 wait/signal nodes**, where the dynamic build
+runs on one stream with none. On a model whose whole forward pass is about a
+millisecond, that synchronisation costs more than the parallelism returns, which is why
+a static shape wins for FP16 and loses for INT8.
+
+**Static or dynamic shape.** For FP16 at a fixed batch, build static: 0.540 ms against
+0.778 ms, 44% faster, because dynamic shapes block the constant folding that takes the
+graph from 321 nodes to 233. For INT8 it is the other way round, for the streams-and-
+synchronisation reason just above.
+
+### Where the accuracy goes
+
+Recorded before the latency above was measured, and kept because it is the answer to a
+separate question — *if* INT8 were worth using, which layers cost the accuracy. All rows
+are the same 500 val2017 images against the 0.4008 FP32 baseline.
+
+Two things were ruled out first. **Calibrator preprocessing**: `ImageCalibrator` calls
+the same `common.preprocess` used at inference, so the dynamic ranges are measured on
+the data the model actually sees. **Calibration set size**: 500 images gives 0.2898,
+1000 gives 0.3136, 2000 gives 0.3122 — saturated at 1000, which is what `run_all.sh`
+uses.
+
+Then a per-block sweep, pinning one `/model.N/` block back to FP16 and leaving the rest
+in INT8, so each delta is that block's share of the 0.0872 gap:
+
+| pinned block | mAP50-95 | delta | share of gap |
+|---|---|---|---|
+| `/model.22/` (detect head) | 0.3580 | +0.0444 | 50.9% |
+| `/model.4/` (C2f, stride 8) | 0.3252 | +0.0116 | 13.3% |
+| `/model.2/` | 0.3162 | +0.0026 | 3.0% |
+| 10 other blocks | 0.3107–0.3152 | -0.0029 to +0.0016 | dust |
+| `/model.21/` | 0.3080 | -0.0056 | -6.4% |
+
+Two blocks hold 64% of it. The negative entries are not noise — rebuilding the same
+pinning twice moves mAP by 0.0001, while `/model.21/` costs 0.0056 — so taking a block
+out of INT8 can make things worse by shifting where TensorRT fuses and quantizes around
+it. Stacking the blocks that help is close to additive:
+
+| config | mAP50-95 | vs FP32 |
+|---|---|---|
+| INT8 | 0.3136 | -21.8% |
+| + `/model.22/` | 0.3579 | -10.7% |
+| + `/model.4/` | 0.3723 | -7.1% |
+| + `/model.2/` | 0.3758 | -6.2% |
+| + `/model.1/`, `/model.3/`, `/model.6/` | 0.3879 | -3.2% |
+
+So the accuracy is recoverable to within the 3-4% that post-training quantization is
+normally expected to cost. It just is not worth recovering at batch 1, because each
+block taken out of INT8 also moves the latency back toward FP16's.
+
 ## Verified environment
 Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /
 TensorRT 10.16.1.11 / Python 3.10.12.
@@ -100,7 +232,7 @@ the order it runs them:
 | `verify_env.py` | Gate before measuring anything. Checks what fails silently: ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels. Writes `env_report.json`. |
 | `prepare_data.py` | Deterministic 500-image measurement set from val2017. |
 | `fetch_train_pool.py` | Pulls the train2017 pool used for INT8 calibration. |
-| `build_engine.py` | TensorRT 10 builder, with a real INT8 calibrator and a fingerprinted calibration cache. |
+| `build_engine.py` | TensorRT 10 builder, with a real INT8 calibrator and a fingerprinted calibration cache. `--fp16-prefix` pins named blocks back to FP16; `--detailed-layers` keeps per-layer info for profiling. |
 | `check_parity.py` | The gate between export and measurement. Same images through every runtime, detections compared against PyTorch. |
 | `benchmark.py` | Latency: warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs. Appends to `results.jsonl`. |
 | `evaluate.py` | Accuracy: COCO mAP via pycocotools. Appends to `accuracy.jsonl`. |
@@ -150,8 +282,9 @@ one at a time rather than pulling `train2017.zip`, which is ~19 GB against the
 whole split, so a pool this size is plenty. The manifest is committed (34 KB) so a
 clone gets the same pool without re-deriving it from the 241 MB annotations
 archive; it is the first 2000 of all 118,287 train2017 filenames after a seeded
-shuffle. 2000 rather than 500 leaves room to retry with 1000 images if INT8 turns
-out to cost too much mAP.
+shuffle. 2000 rather than 500 leaves room to retry with more images if INT8 turns
+out to cost too much mAP — which it did, and the retry is why the build calibrates on
+1000 (see below).
 
 Both selections are seeded (1337) and self-verifying — each script recomputes
 its manifest hash and exits non-zero on a mismatch, so pointing `--src` at the

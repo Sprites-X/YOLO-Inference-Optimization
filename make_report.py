@@ -23,6 +23,45 @@ def key_of(r: dict) -> tuple:
     return (r.get("runtime"), r.get("precision"), r.get("device"))
 
 
+def row_key(r: dict) -> tuple:
+    """Identity of one measured row, for collapsing re-runs of the same config.
+
+    Wider than key_of(), which is only the accuracy join. Batch and tag are what put
+    two rows on separate lines of the table: the batch sweep runs a dynamic-shape
+    engine that shares runtime/precision/device with the static one while being a
+    different engine with different numbers.
+    """
+    return (r.get("runtime"), r.get("precision"), r.get("device"),
+            r.get("batch", 1), r.get("tag", ""))
+
+
+def newest_per_config(results: list[dict]) -> tuple[list[dict], list[tuple]]:
+    """One row per config, the last one measured. Returns (kept, collapsed).
+
+    results.jsonl is append-only, so a sweep run without run_all.sh --fresh appends a
+    second set of rows rather than replacing the first, and the table then prints every
+    config twice — once with each run's numbers, nothing saying which is which. That
+    happened, and the doubled table is not obviously wrong at a glance, which is the
+    problem with it.
+
+    Ordered by timestamp rather than file position, so rows concatenated out of order
+    still resolve to the genuinely newest. Rows written before benchmark.py recorded a
+    timestamp sort as empty and fall back to file order, which is the best available
+    answer for them.
+    """
+    best: dict[tuple, tuple] = {}
+    counts: dict[tuple, int] = {}
+    for i, r in enumerate(results):
+        k = row_key(r)
+        counts[k] = counts.get(k, 0) + 1
+        rank = (r.get("timestamp") or "", i)
+        if k not in best or rank > best[k][0]:
+            best[k] = (rank, i, r)
+    kept = [r for _, _, r in sorted(best.values(), key=lambda v: v[1])]
+    collapsed = [(k, n) for k, n in counts.items() if n > 1]
+    return kept, collapsed
+
+
 def label_of(r: dict) -> str:
     b = r.get("batch", 1)
     suffix = f" b{b}" if b and b > 1 else ""
@@ -47,10 +86,19 @@ def main():
     if not results:
         raise SystemExit(f"no data in {args.results} — run benchmark.py first")
 
-    # NOTE: both files are append-only. Re-running the same config gives a duplicate
-    # row in the table, and acc_map keeps the last one. Delete the files before starting
-    # a fresh sweep.
-    #
+    # Both files are append-only, so a sweep run without run_all.sh --fresh leaves two
+    # measurements of every config in here. Collapse to the newest of each rather than
+    # printing both: two rows for one config is not a comparison, it is the same table
+    # twice with no way to tell which run a row came from.
+    results, collapsed = newest_per_config(results)
+    if collapsed:
+        print(f"[dedupe] {sum(n for _, n in collapsed)} rows for "
+              f"{len(collapsed)} configs — keeping the newest measurement of each:")
+        for (runtime, precision, device, batch, tag), n in sorted(collapsed):
+            label = f"{runtime} {precision} {device} b{batch}" + (f" [{tag}]" if tag else "")
+            print(f"           {label}: {n} rows")
+        print("           (run_all.sh --fresh clears the old ones instead)")
+
     # The mAP column used to read 0.3651 for PyTorch FP32 GPU — the full-val2017 number,
     # joined onto a latency row timed on val500, where that same config scores 0.4008.
     # Nothing in the table said the two came from different image sets. Rows measured on
@@ -59,15 +107,22 @@ def main():
     acc_map = {}
     for a in graded:
         prev = acc_map.get(key_of(a))
-        # A re-run is a fine reason for a duplicate and the newer row wins, but it is
-        # said out loud: a duplicate that is not a re-run means two different configs
-        # are sharing a key, and then the mAP column is reporting the wrong model.
-        if prev:
-            print(f"[warn] two accuracy rows for {key_of(a)}: "
+        # accuracy.jsonl carries no timestamp, so file order is the only ordering there
+        # is and the later row wins. Re-measuring the same model is the ordinary reason
+        # for a duplicate and needs no comment; two *different* models under one key is
+        # not — the mAP column would then report the wrong model, so that one is said
+        # out loud.
+        if prev and prev.get("model") != a.get("model"):
+            print(f"[warn] two accuracy rows for {key_of(a)} from different models: "
                   f"{prev['model']} {prev['mAP50_95']:.4f} then {a['model']} "
                   f"{a['mAP50_95']:.4f} — using the later one")
         acc_map[key_of(a)] = a
+
+    # Created rather than assumed: --outdir is how a run writes its table somewhere
+    # other than the repo, and the failure without this is a FileNotFoundError from
+    # pathlib after the whole table has already been built and printed.
     outdir = Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     # ---------------- table ----------------
     hdr = ("| Runtime | Precision | Device | Batch | p50 (ms) | p99 (ms) | "

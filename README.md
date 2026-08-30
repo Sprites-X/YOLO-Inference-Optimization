@@ -108,7 +108,7 @@ and compares detections, and `run_all.sh` stops the run if they disagree.
 | PyTorch (baseline) | FP32 | 0.4008 | 0.5476 | — |
 | ONNX Runtime GPU | FP32 | 0.4008 | 0.5475 | 0.0000 |
 | ONNX Runtime CPU | FP32 | 0.4008 | 0.5476 | 0.0000 |
-| TensorRT | FP16 | 0.4003 | 0.5480 | -0.0005 |
+| TensorRT | FP16 | 0.4006 | 0.5481 | -0.0002 |
 
 Same 500 images, same `common.py` pre/postprocess, conf 0.001 / IoU 0.7 as COCO AP
 requires.
@@ -181,7 +181,7 @@ the two are reconciled there, and FP16 wins under both.
 
 | Engine | batch | median | img/s | vs FP16 | mAP50-95 |
 |---|---|---|---|---|---|
-| FP16, static shape | 1 | 0.540 ms | 1841 | — | 0.4003 |
+| FP16, static shape | 1 | 0.540 ms | 1841 | — | 0.4006 |
 | INT8, static shape | 1 | 1.110 ms | 894 | **0.49x** | 0.3136 |
 | FP16, dynamic shape | 1 | 0.778 ms | 1277 | — | 0.4004 |
 | INT8, dynamic shape | 1 | 0.970 ms | 1025 | **0.80x** | 0.3135 |

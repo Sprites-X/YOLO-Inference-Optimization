@@ -395,10 +395,11 @@ def _force_fp16_layers(network, config, prefixes=(HEAD_PREFIX,)) -> int:
     what was asked, which beats it quietly choosing another precision while we believe
     the constraint took.
 
-    Measured on yolov8n over the 500-image set, calibrated on 500 train2017 images:
-    INT8 alone scores mAP50-95 0.2898 against the FP32 baseline's 0.4008, and pinning
-    the head brings it to 0.3519 — a bit over half the loss recovered, for 51 layers out
-    of 299 left in FP16.
+    Measured on yolov8n over the 500-image set, at the 1000 calibration images
+    run_all.sh uses: INT8 alone scores mAP50-95 0.3136 against the FP32 baseline's
+    0.4008, and pinning the head brings it to 0.3579 — a bit over half the loss
+    recovered, for 51 layers out of 299 left in FP16. It also drops the engine from 5
+    auxiliary streams to 2, which is worth 0.46 ms per frame on top of the accuracy.
     """
     config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
 

@@ -291,11 +291,21 @@ def build(args):
         #   max_batch=8 calib_batch=8 + calib prof 1 -> cache unchanged
         # That last line is why config.set_calibration_profile() is not the fix — it
         # does not help, and set wrong it makes things worse. Max batch is what governs.
+        # Pinned to the engine's max batch rather than clamped in one direction, because
+        # both directions are wrong:
+        #   calib_batch > max — TRT reads only the first max images of each chunk and
+        #     drops the rest, quietly calibrating on a fraction of --calib-num
+        #     (--calib-batch 8 with --max-batch 1 = 63 images out of 500).
+        #   calib_batch < max — TRT reads max images anyway, but ImageCalibrator sized
+        #     its device buffer for calib_batch, so the read runs off the end of the
+        #     allocation. Measured with --max-batch 8 --calib-batch 2: dies on the first
+        #     chunk with CUDA 700 (illegal memory access), reported as a cascade of TRT
+        #     errors about calibrator.cpp, deallocation and Myelin teardown that name
+        #     neither batch size. Nothing in it points at --calib-batch.
         calib_batch = args.calib_batch
-        if calib_batch > engine_max_batch:
-            print(f"[calib] lowering --calib-batch {calib_batch} -> {engine_max_batch} "
-                  f"to match the engine's max batch, else TRT reads only the first image "
-                  f"of each chunk (same {args.calib_num} images, just smaller chunks)")
+        if calib_batch != engine_max_batch:
+            print(f"[calib] --calib-batch {calib_batch} -> {engine_max_batch} to match the "
+                  f"engine's max batch (same {args.calib_num} images, different chunk size)")
             calib_batch = engine_max_batch
 
         fp = _calib_fingerprint(args.onnx, args.calib_dir, args.size,

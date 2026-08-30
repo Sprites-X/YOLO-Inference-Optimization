@@ -26,7 +26,8 @@ def key_of(r: dict) -> tuple:
 def label_of(r: dict) -> str:
     b = r.get("batch", 1)
     suffix = f" b{b}" if b and b > 1 else ""
-    return f"{r['runtime']}\n{r['precision']} {r['device']}{suffix}"
+    tag = f"\n{r['tag']}" if r.get("tag") else ""
+    return f"{r['runtime']}\n{r['precision']} {r['device']}{suffix}{tag}"
 
 
 def main():
@@ -96,7 +97,12 @@ def main():
         # is only a fallback for rows recorded before vram_mb existed.
         vram = r.get("vram_mb") or r.get("peak_vram_mb")
         cells = [
-            r["runtime"],
+            # The tag distinguishes rows the table would otherwise print identically:
+            # the batch sweep runs a dynamic-shape engine at batch 1 as its own
+            # reference point, which collides with the static engine's batch 1 row on
+            # every visible column while being a different engine with different
+            # numbers. benchmark.py --tag is what sets it.
+            r["runtime"] + (f" ({r['tag']})" if r.get("tag") else ""),
             r["precision"],
             r["device"],
             str(r.get("batch", 1)),
@@ -122,7 +128,8 @@ def main():
         table += "\n\n**Speedup vs PyTorch GPU FP32 (batch 1):**\n\n"
         table += "| Config | Speedup |\n|---|---|\n"
         for r in sorted(results, key=lambda x: -x["fps"]):
-            table += (f"| {r['runtime']} {r['precision']} {r['device']} "
+            tag = f" {r['tag']}" if r.get("tag") else ""
+            table += (f"| {r['runtime']}{tag} {r['precision']} {r['device']} "
                       f"b{r.get('batch',1)} | {r['fps']/baseline_fps:.2f}x |\n")
 
     (outdir / "report_table.md").write_text(table, encoding="utf-8")

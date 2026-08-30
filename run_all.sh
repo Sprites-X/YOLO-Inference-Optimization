@@ -79,6 +79,24 @@ python benchmark.py --images $IMAGES --runtime tensorrt --model yolov8n_fp16.eng
 python benchmark.py --images $IMAGES --runtime tensorrt --model yolov8n_int8.engine
 python benchmark.py --images $IMAGES --runtime tensorrt --model yolov8n_int8_fp16head.engine
 
+# Batch experiment. Batch 1 answers "how fast is one frame"; it cannot answer "can this
+# card keep up with four 30 FPS cameras", which needs throughput at batch and the
+# per-frame cost of getting it. FP16 only: INT8 loses to it at every batch size already
+# measured, so sweeping it again would add rows without changing the recommendation.
+#
+# Built from the dynamic ONNX, which is the only one that can take a batch dimension.
+# The engine is a different one from yolov8n_fp16.engine even at batch 1, so its rows
+# carry --tag batch-sweep and the report prints that; without it the batch 1 row would
+# be indistinguishable from the static engine's while holding different numbers.
+echo "=== batch sweep ==="
+python build_engine.py --onnx yolov8n_dyn.onnx --precision fp16 \
+    --min-batch 1 --opt-batch 4 --max-batch 8 --engine yolov8n_fp16_dyn.engine
+
+for B in 1 4 8; do
+    python benchmark.py --images $IMAGES --runtime tensorrt \
+        --model yolov8n_fp16_dyn.engine --batch $B --tag batch-sweep
+done
+
 echo "=== accuracy ==="
 python evaluate.py --images $IMAGES --ann $ANN --runtime pytorch  --model $MODEL
 python evaluate.py --images $IMAGES --ann $ANN --runtime onnx     --model yolov8n.onnx

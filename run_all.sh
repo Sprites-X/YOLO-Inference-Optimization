@@ -12,6 +12,19 @@ CALIB=data/train_pool
 ANN=annotations/instances_val2017.json
 MODEL=yolov8n.pt
 
+# `yolo` is called through the venv's python instead of whatever PATH resolves, because
+# activating the venv does not guarantee the venv's copy wins. On this machine
+# ~/.local/bin sits ahead of .venv/bin, so bare `yolo` is a different ultralytics
+# (8.4.104 against the venv's 8.4.126) — it would export the ONNX from one version while
+# every other step in this script uses another, and nothing downstream would say so.
+# Shadowing the name keeps the call sites below reading as plain `yolo`.
+yolo () {
+    python -c 'import sys
+from ultralytics.cfg import entrypoint
+sys.argv = ["yolo", *sys.argv[1:]]
+sys.exit(entrypoint())' "$@"
+}
+
 echo "=== environment ==="
 python verify_env.py || { echo "fix the failures before going further"; exit 1; }
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
  
 # Gate that runs before any measurement, writing env_report.json to go alongside the
 # README. Benchmark numbers mean nothing without knowing what they were measured on.
@@ -370,6 +372,28 @@ def check_misc():
             # benchmark.py, which is the main job, runs without it.
             (warn if mod == "pycocotools" else fail)(mod, "not installed")
  
+    # Activating the venv is not the same as the venv's `yolo` winning. Activation puts
+    # .venv/bin on PATH, but does not guarantee it comes first: here ~/.local/bin sits
+    # ahead of it, so bare `yolo` was ultralytics 8.4.104 while every import in this venv
+    # gets 8.4.126. It cost a sweep — the export step ran from the wrong install, and on
+    # a machine where that install merely works rather than crashes, the ONNX would have
+    # been exported by one version while everything measuring it used another, silently.
+    # run_all.sh now calls the entrypoint through python and does not depend on PATH;
+    # this is a WARN for the README's step-by-step commands, which do run `yolo`.
+    cli = shutil.which("yolo")
+    venv_root = Path(sys.prefix).resolve()
+    if cli is None:
+        warn("yolo CLI", "not on PATH — run_all.sh does not need it, the README's "
+                         "individual export commands do")
+    elif not Path(cli).resolve().is_relative_to(venv_root):
+        # tail -1 because a mismatched install often prints an import traceback first.
+        cli_ver = sh(f"'{cli}' version 2>&1 | tail -1") or "unreadable"
+        warn("yolo CLI", f"{cli} is outside this venv (says {cli_ver!r}, venv has "
+                         f"{REPORT['versions'].get('ultralytics')!r}) — running "
+                         f"`yolo export` by hand would use that one")
+    else:
+        ok("yolo CLI", cli)
+
     # A powersave governor makes the CPU baseline row slower than the hardware really
     # is, which flatters the GPU speedup. The setting only lasts until reboot, so it
     # has to be redone each time.

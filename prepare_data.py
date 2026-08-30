@@ -119,6 +119,21 @@ def main():
     }, indent=2))
     print(f"[data] wrote {split_path}")
 
+    # The calibration pool must not contain any image we are about to score. val500 is
+    # val2017 and the pool is train2017, so they cannot overlap by definition — but
+    # "by definition" is an argument, not a check, and --out pointed at the wrong
+    # directory would break it silently. fetch_train_pool.py makes the same check from
+    # its side; whichever script runs second is the one that catches it.
+    pool = Path("data/train_pool")
+    if pool.is_dir():
+        overlap = {p.name for p in pool.iterdir()} & {p.name for p in chosen}
+        if overlap:
+            raise SystemExit(
+                f"[data] val500 overlaps data/train_pool by {len(overlap)} images — "
+                f"INT8 would calibrate on the images it is scored against, and the "
+                f"mAP it reports would be too good with nothing to flag it")
+        print("[data] no overlap with data/train_pool — safe to calibrate without leakage")
+
     # Only comparable to the known value when the defaults are used. If the seed or
     # num changed, a different hash is intentional, not a mistake.
     if (args.seed, args.num) != (SEED, VAL_NUM):

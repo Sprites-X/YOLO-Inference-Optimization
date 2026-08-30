@@ -9,15 +9,13 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from make_report import key_of, label_of, load_jsonl, newest_per_config, row_key
 
 
 def result(runtime="TensorRT", precision="FP16", device="GPU", batch=1, tag="",
-           ts="2026-08-30T06:00:00+00:00", fps=100.0):
+           ts="2026-08-30T06:00:00+00:00", fps=100.0, model="yolov8n_fp16.engine"):
     return {"timestamp": ts, "runtime": runtime, "precision": precision,
-            "device": device, "batch": batch, "tag": tag, "fps": fps}
+            "device": device, "batch": batch, "tag": tag, "fps": fps, "model": model}
 
 
 # --------------------------------------------------------------------------
@@ -30,13 +28,21 @@ def test_accuracy_key_ignores_batch():
 
 
 def test_row_key_separates_the_batch_sweep_from_the_static_engine():
-    # These two collide on every column the accuracy join looks at while being
-    # different engines with different numbers — the sweep's dynamic-shape build is
-    # 12% slower at batch 1 than the static one.
-    static = result(batch=1, tag="")
-    sweep = result(batch=1, tag="batch-sweep")
-    assert key_of(static) == key_of(sweep)          # same accuracy row, correctly
+    # These two collide on runtime/precision/device while being different engines with
+    # different numbers — the sweep's dynamic-shape build is 13% slower at batch 1 than
+    # the static one.
+    static = result(batch=1, tag="", model="yolov8n_fp16.engine")
+    sweep = result(batch=1, tag="batch-sweep", model="yolov8n_fp16_dyn.engine")
     assert row_key(static) != row_key(sweep)        # separate table rows, correctly
+
+
+def test_accuracy_key_separates_two_builds_of_one_precision():
+    # The join has to see the model, or the batch-sweep rows inherit the static
+    # engine's mAP and the table prints it as though that engine had been scored.
+    # evaluate.py never runs on the sweep engine, so the honest cell there is "—".
+    static = result(model="yolov8n_fp16.engine")
+    sweep = result(tag="batch-sweep", model="yolov8n_fp16_dyn.engine")
+    assert key_of(static) != key_of(sweep)
 
 
 def test_row_key_separates_batches():

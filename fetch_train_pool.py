@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Fetch COCO train2017 images as the pool for INT8 calibration.
 
-    data/train_pool/  2000 train2017 images -> 500 sampled from it to calibrate
+    data/train_pool/  2000 train2017 images -> 1000 sampled from it to calibrate
 
 **Why not download all of train2017.zip** — train2017 is 118,287 images / ~19GB, and
 the machine this was built on had 13GB free. So only the images named in
 train_pool_manifest.txt are fetched, one at a time from images.cocodataset.org
-(~330MB). Calibration needs a few hundred images, not a whole split, so a pool this
+(~315MB). Calibration needs a fraction of a split, not a whole one, so a pool this
 size is plenty.
 
 **Why the list lives in a manifest instead of being sampled at runtime** — sampling at
@@ -17,7 +17,7 @@ the same pool without downloading 241MB of annotations to regenerate it.
 The manifest was built by sorting all 118,287 train2017 filenames, running
 random.Random(1337).shuffle(), and taking the first 2000. 2000 rather than 500 because
 if INT8 costs too much mAP, one fix is raising the calibration set to 1000 — this
-leaves room to try that.
+leaves room to try that, and run_all.sh does calibrate on 1000.
 
 **This set must not overlap data/val500** — val500 comes from val2017 and this pool
 from train2017, different COCO splits, so they cannot overlap by definition. The
@@ -91,10 +91,21 @@ def main():
 
     names = [l.strip() for l in Path(args.manifest).read_text().splitlines() if l.strip()]
     digest = manifest_hash(names)
+    # Fatal rather than a warning, and for the same reason prepare_data.py exits on its
+    # own hash: a pool that differs from the recorded one produces different dynamic
+    # ranges, so the INT8 rows stop being comparable to the ones in the README, and
+    # nothing downstream would say so. Only checked for the committed manifest — a
+    # deliberate --manifest is a different set on purpose, so it warns instead.
     if digest != EXPECTED_MANIFEST:
-        print(f"[pool] warning: manifest sha256 {digest[:16]}… does not match the recorded "
-              f"value ({EXPECTED_MANIFEST[:16]}…) — this pool will differ from other machines",
-              file=sys.stderr)
+        detail = (f"manifest sha256 {digest[:16]}… does not match the recorded value "
+                  f"({EXPECTED_MANIFEST[:16]}…)")
+        if args.manifest == MANIFEST:
+            raise SystemExit(
+                f"[pool] {detail}\n"
+                f"{MANIFEST} has been edited or truncated — restore it "
+                f"(git checkout {MANIFEST}), or pass --manifest to use a pool of your own")
+        print(f"[pool] warning: {detail} — non-default --manifest, so this pool will "
+              f"differ from other machines", file=sys.stderr)
     if args.limit:
         names = names[:args.limit]
 
@@ -132,7 +143,9 @@ def main():
 
     size_mb = sum(p.stat().st_size for p in dest.iterdir()) / 1024 / 1024
     print(f"[pool] {dest}: {len(have)} images ({size_mb:.0f} MB)")
-    print(f"[pool] sample for calib: ls {dest}/*.jpg | shuf -n 500 | xargs -I{{}} cp {{}} data/calib/")
+    # build_engine.py reads this directory directly and takes its own seeded sample
+    # (--calib-num), so there is nothing to copy anywhere first.
+    print(f"[pool] ready to calibrate: build_engine.py --calib-dir {dest} --calib-num 1000")
 
 
 if __name__ == "__main__":

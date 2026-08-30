@@ -20,7 +20,7 @@ except ImportError:
     from cuda import cudart
 
 sys.path.insert(0, str(Path(__file__).parent))
-from common import IMG_SIZE, preprocess  
+from common import IMG_SIZE, preprocess
 
 TRT_LOGGER = trt.Logger(trt.Logger.INFO)
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp"}
@@ -108,7 +108,7 @@ class ImageCalibrator(trt.IInt8EntropyCalibrator2):
         # which are not spread across image types. The seed is fixed so every build
         # uses the same set — otherwise measured INT8 mAP moves because the
         # calibration set changed, not because the code did.
-        random.Random(seed).shuffle(files) 
+        random.Random(seed).shuffle(files)
         self.files = files[:num_images]
         self.index = 0
 
@@ -134,6 +134,9 @@ class ImageCalibrator(trt.IInt8EntropyCalibrator2):
         for p in chunk:
             img = cv2.imread(str(p))
             if img is None:
+                # Calibrating on fewer images than --calib-num asked for changes the
+                # dynamic ranges, so it cannot pass silently.
+                print(f"\n[calib] warning: cannot decode {p.name}, calibrating without it")
                 continue
             # Must be the same common.preprocess used at inference. Calibrate through
             # a different preprocess and the dynamic ranges will not match the data the
@@ -399,7 +402,10 @@ def _force_fp16_layers(network, config, prefixes=(HEAD_PREFIX,)) -> int:
     run_all.sh uses: INT8 alone scores mAP50-95 0.3136 against the FP32 baseline's
     0.4008, and pinning the head brings it to 0.3579 — a bit over half the loss
     recovered, for 51 layers out of 299 left in FP16. It also drops the engine from 5
-    auxiliary streams to 2, which is worth 0.46 ms per frame on top of the accuracy.
+    auxiliary streams to 2, which costs nothing measurable per frame: the two engines
+    time 2.01 and 2.04 ms, and rebuilding either moves it further than that. An earlier
+    sweep read the gap as 0.46 ms in the head-pinned engine's favour and did not
+    reproduce — pin the head for the mAP, not for the latency.
     """
     config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
 
@@ -467,7 +473,9 @@ def main():
     # ("calibration.cache") let different models share dynamic ranges with nothing to
     # flag it.
     ap.add_argument("--calib-cache", default=None)
-    ap.add_argument("--calib-num", type=int, default=500)
+    ap.add_argument("--calib-num", type=int, default=500,
+                    help="images to calibrate on (run_all.sh passes 1000, which is "
+                         "where mAP saturates — see its INT8 step)")
     # Always clamped down to the engine's max batch in build(); reasoning is there.
     ap.add_argument("--calib-batch", type=int, default=8)
     # Was a layer count, which selected the wrong layers entirely — see _force_fp16_layers.

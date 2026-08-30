@@ -17,10 +17,16 @@ def load_jsonl(p: str) -> list[dict]:
 
 def key_of(r: dict) -> tuple:
     # Join key between results.jsonl and accuracy.jsonl. Batch is left out on purpose:
-    # mAP does not depend on batch size, so the b1 and b8 rows can share one accuracy
-    # value. (Must be spelled exactly as benchmark.py and evaluate.py write it — see
+    # mAP does not depend on batch size, so the b1 and b8 rows of one engine share a
+    # single accuracy row. The model file is *not* left out, and that is the difference
+    # between the two: the batch sweep runs yolov8n_fp16_dyn.engine, which shares
+    # runtime/precision/device with the static yolov8n_fp16.engine while being a
+    # separate build that evaluate.py never scores. Joining without the model handed
+    # those rows the static engine's mAP and printed it as if it had been measured —
+    # the README puts the two builds 0.0002 apart, so it is not even the same number.
+    # (Must be spelled exactly as benchmark.py and evaluate.py write it — see
     # evaluate.py:record.)
-    return (r.get("runtime"), r.get("precision"), r.get("device"))
+    return (r.get("runtime"), r.get("precision"), r.get("device"), r.get("model"))
 
 
 def row_key(r: dict) -> tuple:
@@ -150,7 +156,11 @@ def main():
         # loaded and again after the run, the same way for every row. peak_vram_mb is
         # each runtime's own measure and means something different in every row, so it
         # is only a fallback for rows recorded before vram_mb existed.
-        vram = r.get("vram_mb") or r.get("peak_vram_mb")
+        # `or` here would treat a genuine 0 MB delta as missing and fall through to
+        # the runtime's own, incomparable number.
+        vram = r.get("vram_mb")
+        if vram is None:
+            vram = r.get("peak_vram_mb")
         cells = [
             # The tag distinguishes rows the table would otherwise print identically:
             # the batch sweep runs a dynamic-shape engine at batch 1 as its own
@@ -173,7 +183,7 @@ def main():
             # Comparable for rows carrying vram_mb. An older row falls back to
             # peak_vram_mb, which is not comparable to anything — PyTorch counted
             # allocator tensors, TensorRT read the whole card, ONNX reported nothing.
-            f"{vram:.0f}" if vram else "—",
+            f"{vram:.0f}" if vram is not None else "—",
         ]
         lines.append("| " + " | ".join(cells) + " |")
 
@@ -260,6 +270,8 @@ def main():
         # The near-lossless rows all sit within a hair of the same mAP, so their labels
         # would print over each other however they are anchored. They get dropped below
         # the marker (clear of the title) and stepped down in turn, left to right.
+        # Four of them land there on a full sweep — the three FP32 rows plus TRT FP16 —
+        # which a two-level stagger still overlapped.
         top = max(a["mAP50_95"] for _, a in pts)
         high_x = sorted(r["fps"] for r, a in pts if a["mAP50_95"] > top - 0.005)
         for r, a in pts:
@@ -267,8 +279,7 @@ def main():
             b = r.get("batch", 1)
             tag = f"{r['runtime']} {r['precision']}\n{r['device']}" + (f" b{b}" if b > 1 else "")
             if a["mAP50_95"] > top - 0.005:
-                # Three levels, not two: the batch sweep puts four near-lossless points
-                # into the top-right corner and a two-level stagger still overlapped.
+                # Three levels, not two: see the note above.
                 dy = -24 - 20 * (high_x.index(r["fps"]) % 3)
                 ax.annotate(tag, (r["fps"], a["mAP50_95"]), textcoords="offset points",
                             xytext=(0, dy), fontsize=8, ha="center")

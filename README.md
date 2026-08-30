@@ -2,34 +2,35 @@
 
 Benchmarking YOLOv8n across PyTorch / ONNX Runtime /
 TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
-TensorRT FP16 reaches 699 FPS, 2.63x PyTorch on the same GPU, at the same accuracy.
+TensorRT FP16 reaches 702 FPS, 2.60x PyTorch on the same GPU, at the same accuracy.
 
 **Status:** Complete. Seven configurations measured in a single run across CPU and GPU,
-each checked against the PyTorch baseline before being timed, plus a batch sweep at
-1/4/8. The result that did not go as expected: INT8 is slower than FP16 *and* less
-accurate, at every batch size tried — so the accuracy-for-speed trade this project set
-out to characterise turns out not to exist on this hardware. See
+every export checked against the PyTorch baseline before being timed — the two INT8
+engines report that check rather than pass it, for a [measured reason](#export-parity) —
+plus a batch sweep at 1/4/8. The result that did not go as expected: INT8 is slower than
+FP16 *and* less accurate, at every batch size tried — so the accuracy-for-speed trade
+this project set out to characterise turns out not to exist on this hardware. See
 [INT8: what it costs](#int8-what-it-costs).
 
 ## Results (YOLOv8n, 640x640)
 
 | Runtime | Precision | Device | p50 (ms) | p99 (ms) | FPS | E2E (ms) | mAP50-95 | Size (MB) | VRAM (MB) | vs PyTorch GPU |
 |---|---|---|---|---|---|---|---|---|---|---|
-| TensorRT | FP16 | RTX 5060 | **1.43** | 1.49 | **699.4** | 3.62 | 0.4006 | 7.9 | 189 | **2.63x** |
-| TensorRT | INT8+FP16head | RTX 5060 | 2.04 | 2.10 | 488.7 | 5.39 | 0.3579 | 51.3 | 250 | 1.84x |
-| TensorRT | INT8 | RTX 5060 | 2.50 | 2.58 | 399.1 | 5.76 | 0.3136 | 52.7 | 281 | 1.50x |
-| ONNX Runtime | FP32 | RTX 5060 | 2.81 | 3.10 | 352.2 | 5.97 | 0.4008 | 12.3 | 212 | 1.32x |
-| PyTorch | FP32 | RTX 5060 | 3.72 | 4.26 | 266.1 | 6.22 | 0.4008 | 6.2 | 208 | 1.00x |
-| PyTorch | FP32 | Ryzen 5 7500F | 22.11 | 30.11 | 43.8 | 24.89 | — | 6.2 | — | 0.16x |
-| ONNX Runtime | FP32 | Ryzen 5 7500F | 27.16 | 43.43 | 34.6 | 32.14 | 0.4008 | 12.3 | — | 0.13x |
+| TensorRT | FP16 | RTX 5060 | **1.42** | 1.48 | **702.1** | 3.49 | 0.4006 | 7.9 | 169 | **2.60x** |
+| TensorRT | INT8 | RTX 5060 | 2.01 | 2.06 | 498.2 | 4.89 | 0.3136 | 52.7 | 257 | 1.85x |
+| TensorRT | INT8+FP16head | RTX 5060 | 2.04 | 2.15 | 489.7 | 4.96 | 0.3579 | 51.2 | 265 | 1.82x |
+| ONNX Runtime | FP32 | RTX 5060 | 2.86 | 3.22 | 345.9 | 6.11 | 0.4008 | 12.3 | 251 | 1.28x |
+| PyTorch | FP32 | RTX 5060 | 3.66 | 4.40 | 269.7 | 5.99 | 0.4008 | 6.2 | 207 | 1.00x |
+| PyTorch | FP32 | Ryzen 5 7500F | 20.50 | 28.02 | 46.7 | 23.46 | — | 6.2 | — | 0.17x |
+| ONNX Runtime | FP32 | Ryzen 5 7500F | 26.67 | 43.26 | 36.5 | 30.70 | 0.4008 | 12.3 | — | 0.14x |
 
 A full-val2017 accuracy reference, not a latency measurement: PyTorch FP32 on all 5000
 images scores 0.3651. See [what the mAP numbers mean](#what-the-map-numbers-do-and-do-not-mean).
 
-**TensorRT FP16 is the configuration to use.** It is 2.63x PyTorch on the same GPU, uses
+**TensorRT FP16 is the configuration to use.** It is 2.60x PyTorch on the same GPU, uses
 the least VRAM of any GPU row, and gives up 0.0002 mAP. Both INT8 variants are slower
 than FP16 *and* less accurate — [why that happens](#int8-what-it-costs) is its own
-section. The GPU is 5.9x the PyTorch CPU baseline, and ONNX Runtime on CPU is slower
+section. The GPU is 5.8x the PyTorch CPU baseline, and ONNX Runtime on CPU is slower
 than PyTorch on CPU, which is the one result here that runs against the usual
 expectation that an exported graph beats an eager one.
 
@@ -44,24 +45,32 @@ for it.
 
 Latency is one full inference cycle — host-to-device, execute, device-to-host, then
 synchronise — mean of 3 runs of 300 iterations (CPU: 100) after 50 warm-up iterations,
-over the 500-image set. That is the per-frame cost a real caller pays, and it is
-deliberately not the same measurement `trtexec --noDataTransfers` reports in the INT8
-section below; the two differ by more than transfer time, for a reason worth knowing:
+each iteration taking the next image from the 500-image set. That is the per-frame cost
+a real caller pays, and it is deliberately not the same measurement
+`trtexec --noDataTransfers` reports in the INT8 section below; the two differ by more
+than transfer time, for a reason worth knowing:
 
 | engine | auxiliary streams | trtexec, pipelined | this table, serialised | difference |
 |---|---|---|---|---|
-| FP16 | 2 | 0.542 ms | 1.43 ms | 0.89 ms |
-| INT8+FP16head | 2 | 1.148 ms | 2.04 ms | 0.89 ms |
-| INT8 | **5** | 1.115 ms | 2.50 ms | **1.39 ms** |
+| FP16 | 2 | 0.538 ms | 1.42 ms | 0.88 ms |
+| INT8 | **5** | 1.112 ms | 2.01 ms | 0.89 ms |
+| INT8+FP16head | 2 | 1.143 ms | 2.04 ms | 0.89 ms |
 
 trtexec measures steady-state throughput, where an engine's auxiliary streams overlap
-across consecutive inferences. A per-frame pipeline cannot use that overlap and pays to
-synchronise those streams on every call. Both engines with 2 auxiliary streams pay the
-same 0.89 ms; the one with 5 pays half a millisecond more. It reverses the ranking of
-the two INT8 engines — pipelined, plain INT8 looks slightly faster than the head-pinned
-one; per frame, it is half a millisecond slower. Pinning the detect head back to FP16
-drops the engine from 5 auxiliary streams to 2, so it buys latency as well as accuracy.
-Neither measurement changes the headline: FP16 wins under both.
+across consecutive inferences. A per-frame pipeline cannot use that overlap, and it pays
+a host-to-device copy, a device-to-host copy and a synchronise on every call. That
+surcharge comes out at 0.88-0.89 ms on all three engines — flat, and indifferent to the
+auxiliary-stream count, which reads 2, 5 and 2 down that column. So the per-frame
+ranking is the pipelined ranking with a constant added to it, and both orderings put
+FP16 first by a wide margin with the two INT8 engines 0.03 ms apart.
+
+That constant replaced an earlier reading. The previous commit of `results.jsonl`
+recorded plain INT8 at 2.50 ms, which made the 5-stream engine look like it paid half a
+millisecond for its streams and made pinning the head look as though it bought latency
+as well as accuracy. Rebuilding that engine and re-measuring gives 2.01 ms against the
+same 5 auxiliary streams, so what moved was the engine the builder produced, not the
+cost of the streams. It is the one number in this report that has not reproduced, and
+[the limitations section](#limitations) says what that costs the rest of the table.
 
 ### Does batching help?
 
@@ -71,23 +80,23 @@ getting it. FP16 only, since INT8 already loses to it at every batch size.
 
 | batch | ms per image | img/s | GPU time for the batch |
 |---|---|---|---|
-| 1 | 1.60 | 624.5 | 1.6 ms |
-| 4 | 1.28 | 770.1 | **5.1 ms** |
-| 8 | 1.28 | 781.1 | **10.2 ms** |
+| 1 | 1.60 | 624.7 | 1.6 ms |
+| 4 | 1.28 | 778.7 | **5.1 ms** |
+| 8 | 1.27 | 784.9 | **10.2 ms** |
 
 **The per-image column is the throughput view and it flatters batching.** Batch 8 looks
-20% cheaper per image, but a frame does not get its result after 1.28 ms — the batch
-takes 1.28 x 8 = 10.2 ms of GPU time, and no frame in it is done until that finishes,
-before counting however long the batch took to fill. So batch 8 buys 25% more
+20% cheaper per image, but a frame does not get its result after 1.27 ms — the batch
+takes 1.27 x 8 = 10.2 ms of GPU time, and no frame in it is done until that finishes,
+before counting however long the batch took to fill. So batch 8 buys 26% more
 throughput for roughly 6x the per-frame latency, and almost all of that throughput
-arrives by batch 4; the step from 4 to 8 is worth 1.4%.
+arrives by batch 4; the step from 4 to 8 is worth 0.8%.
 
 For a per-frame deadline, batch 1 is the right answer on this card. Note also that the
-batch-1 row here is 1.60 ms against the static engine's 1.43 ms — the sweep uses a
-dynamic-shape engine, and that flexibility costs 12% even when you feed it one image.
+batch-1 row here is 1.60 ms against the static engine's 1.42 ms — the sweep uses a
+dynamic-shape engine, and that flexibility costs 13% even when you feed it one image.
 
 To the original question: four cameras at 30 FPS is 120 FPS, and static FP16 at batch 1
-delivers 699. Nearly 6x headroom without batching at all, so the interesting constraint
+delivers 702. Nearly 6x headroom without batching at all, so the interesting constraint
 on this card is not throughput.
 
 mAP is measured at conf 0.001 / IoU 0.7 as COCO AP requires; the latency rows use
@@ -99,22 +108,22 @@ purpose. Every row was measured in one `./run_all.sh` run with the CPU governor 
 
 **Use TensorRT FP16 at batch 1.** On this hardware it is not a trade at all — it is the
 fastest configuration measured, at baseline accuracy (0.4006 against 0.4008), with the
-lowest VRAM of any GPU row. There is no accuracy being sacrificed for the 2.63x, which
+lowest VRAM of any GPU row. There is no accuracy being sacrificed for the 2.60x, which
 is the unusual part: the interesting decision this project set out to make turned out
 not to exist.
 
-*If you need throughput.* 699 FPS at batch 1 already covers four 30 FPS cameras nearly
-six times over. Batching to 4 adds 23% and costs about 3x the per-frame latency; batch 8
-adds 1.4% more on top of that and costs 6x. Take batch 4 only if you are genuinely
+*If you need throughput.* 702 FPS at batch 1 already covers four 30 FPS cameras nearly
+six times over. Batching to 4 adds 25% and costs about 3x the per-frame latency; batch 8
+adds 0.8% more on top of that and costs 6x. Take batch 4 only if you are genuinely
 throughput-bound and have no per-frame deadline, and stop there.
 
 *If you need accuracy above all.* Stay on FP32 — PyTorch or ONNX Runtime, both 0.4008.
-ONNX Runtime GPU is 1.32x PyTorch for an identical number, so it is the better of the
+ONNX Runtime GPU is 1.28x PyTorch for an identical number, so it is the better of the
 two. Note that TensorRT FP16 is within 0.0002 of both, so "accuracy above all" barely
 argues against it either.
 
 *If you need the smallest engine.* FP16 again, at 7.9 MB. The INT8 engines are 51-53 MB
-— quantizing this model makes the artifact 6.6x larger, for the reason under
+— quantizing this model makes the artifact 6.7x larger, for the reason under
 [why INT8 is slower](#why-int8-is-slower).
 
 **When INT8 would be worth revisiting.** Not on this card at this model size, but the
@@ -133,13 +142,14 @@ the penalty is the builder rather than the precision.
 
 ## Setup
 
-    git clone git@github.com:Sprites-X/YOLO-Inference-Optimization.git
+    git clone https://github.com/Sprites-X/YOLO-Inference-Optimization.git
     cd YOLO-Inference-Optimization/yolo-bench
     ./setup.sh
 
 That is the whole thing: virtual environment, dependencies, both COCO subsets, and the
 environment check. It is safe to re-run — every step skips itself if already done — and
-it stops at the first failure rather than half-configuring. Budget ~1.4 GB of downloads.
+it stops at the first failure rather than half-configuring. Budget ~1.4 GB of image
+data, plus ~2.5 GB of wheels on a fresh venv.
 Use `PYTHON=/path/to/python3.11 ./setup.sh` if `python3` is not the interpreter you want.
 
 **Prerequisites it cannot install for you:** an NVIDIA GPU, a driver new enough for it
@@ -230,11 +240,25 @@ join. Those are the pieces every row passes through *together*, which is exactly
 in the code all three share leaves it green. pytest is the only dependency here that
 the measurement path does not import; without it the step is skipped rather than fatal.
 
+**What a run does not regenerate.** `run_all.sh` rebuilds every row of the results
+table, the batch sweep and the accuracy table, and nothing else. Four sets of numbers
+here were measured in their own sessions, with the flags named beside them, and are
+reported rather than re-derived on each run: the per-block sensitivity sweep and the
+calibration-set-size study under [where the accuracy goes](#where-the-accuracy-goes),
+the layer-timing profile under [why INT8 is slower](#why-int8-is-slower), the
+gate-perturbation tables under [export parity](#export-parity), and the dynamic-shape
+rows of the trtexec table. Each is reproducible from the flags given — `--fp16-prefix`
+for the sweep, `--calib-num` for the study, `--detailed-layers` plus
+`trtexec --dumpProfile` for the profile — but none of them is regenerated by the
+pipeline, so no file in this repository holds them and a re-run will not update them.
+
 **Your numbers will not match the ones above, and that is expected.** A TensorRT engine
 is built for one GPU and one TensorRT version, so different hardware gives different
 latency outright. Even rebuilding on this machine moves mAP by 0.0001 to 0.0003 through
-tactic selection. What should reproduce is the shape of the result — the ordering of the
-rows, FP16 beating INT8 on both axes, the size of the gaps — not the digits.
+tactic selection. What should reproduce is the shape of the result — FP16 beating both
+INT8 engines on both axes, the size of that gap, the CPU rows an order of magnitude out
+— not the digits. The one ordering that does not reproduce is between the two INT8
+engines: they sit 0.03 ms apart here and have swapped places across rebuilds.
 
 ## Export parity
 
@@ -256,15 +280,15 @@ requires.
 **The gate is not a pixel tolerance.** Two things rule that out:
 
 - *A pixel delta means different things at different box sizes.* 5 px on a 600 px box
-  is nothing; 5 px on a 30 px box is a different detection. Measured over 497 matched
-  pairs against the FP16 engine, mean absolute delta is 0.17 px for boxes under 100 px
-  and 0.46 px for boxes over 500 px, while mean *relative* delta runs the other way —
-  0.38% against 0.08%. A per-box rule in pixels and one in percent fail at opposite
-  ends.
+  is nothing; 5 px on a 30 px box is a different detection. Measured over the 2492 pairs
+  the FP16 engine matches against the baseline, mean absolute delta is 0.17 px for boxes
+  under 100 px and 0.95 px for boxes over 500 px, while mean *relative* delta runs the
+  other way — 0.40% against 0.16%. A per-box rule in pixels and one in percent fail at
+  opposite ends.
 - *NMS keeps one box out of several.* Where an object has near-duplicate candidates the
   scores deciding which survives can differ in the fourth decimal, so the two runtimes
-  keep different, equally valid boxes. On `000000394206.jpg` PyTorch keeps one scoring
-  0.46719 and TensorRT one scoring 0.46680, 47 px apart on a 230 px box. Comparing kept
+  keep different, equally valid boxes. On `000000157418.jpg` PyTorch keeps one scoring
+  0.53674 and TensorRT one scoring 0.53809, 64 px apart on a 594 px box. Comparing kept
   box against kept box is ill-posed here at any threshold.
 
 So the check asks whether both runtimes found the same objects. Every detection has to
@@ -278,11 +302,11 @@ rather than hidden:
 
 - A detection within 0.05 of the confidence threshold may appear on one side only. At
   conf 0.25 a box scoring 0.2510 against 0.2498 is the threshold being stepped over,
-  not a detection being lost. 10 of these across the 500 images.
+  not a detection being lost. 6 of these across the 500 images.
 - A pair below 0.90 IoU is re-checked against the boxes each runtime produced *before*
-  NMS ran. If both sides produced both boxes, only the tie-break differed. 4 of these,
-  between 0.79 and 0.88 IoU, each matching the other side's candidates at 0.988 or
-  better.
+  NMS ran. If both sides produced both boxes, only the tie-break differed. 3 of these,
+  between 0.879 and 0.887 IoU, each one matching a box the other side had produced before
+  NMS at 0.95 IoU or better.
 
 Both gates were checked by perturbing a working engine rather than taken on trust.
 Shifting every box 1 px sideways and widening every box by 2% are both caught, at
@@ -317,12 +341,15 @@ an independent tool measuring steady-state throughput, chosen so this conclusion
 not rest on the same harness that produced the results table; throughput is per image,
 so batched rows are comparable to batch 1. They are pipelined numbers and so run faster
 than the per-frame figures in the [results table](#results-yolov8n-640x640) —
-the two are reconciled there, and FP16 wins under both.
+the two are reconciled there, and FP16 wins under both. The two static rows are
+re-measured on the engines `run_all.sh` builds; the dynamic-shape rows come from engines
+built by hand for this comparison, with a wider batch profile than the sweep engine, and
+the pipeline does not rebuild them.
 
 | Engine | batch | median | img/s | vs FP16 | mAP50-95 |
 |---|---|---|---|---|---|
-| FP16, static shape | 1 | 0.540 ms | 1841 | — | 0.4006 |
-| INT8, static shape | 1 | 1.110 ms | 894 | **0.49x** | 0.3136 |
+| FP16, static shape | 1 | 0.538 ms | 1844 | — | 0.4006 |
+| INT8, static shape | 1 | 1.112 ms | 889 | **0.48x** | 0.3136 |
 | FP16, dynamic shape | 1 | 0.778 ms | 1277 | — | 0.4004 |
 | INT8, dynamic shape | 1 | 0.970 ms | 1025 | **0.80x** | 0.3135 |
 | FP16, dynamic shape | 8 | 3.152 ms | 2468 | — | — |
@@ -336,7 +363,7 @@ INT8 has nothing to win with. It does not rescue it — INT8's best showing anyw
 0.80x of FP16. There is no reason here to pick a config that is slower *and* 22% less
 accurate.
 
-Batching does help FP16, from 1841 to 2468 img/s, and batch 16 is worse than batch 8
+Batching does help FP16, from 1844 to 2468 img/s, and batch 16 is worse than batch 8
 (2226), so the useful operating point on this card is around batch 8.
 
 ### Why INT8 is slower
@@ -365,7 +392,7 @@ memory rather than arithmetic, so halving the width of the arithmetic buys nothi
 still requiring a conversion around every layer.
 
 Treat these numbers as a breakdown of *where the work is*, not as a latency budget:
-profiling adds its own overhead (static INT8 reports 1.716 ms here against 1.110 ms in a
+profiling adds its own overhead (static INT8 reports 1.716 ms here against 1.112 ms in a
 clean run), and with auxiliary streams in play the per-layer sum is not a serial
 timeline.
 
@@ -377,10 +404,10 @@ runs on one stream with none. On a model whose whole forward pass is about a
 millisecond, that synchronisation costs more than the parallelism returns, which is why
 a static shape wins for FP16 and loses for INT8.
 
-**Static or dynamic shape.** For FP16 at a fixed batch, build static: 0.540 ms against
-0.778 ms, 44% faster, because dynamic shapes block the constant folding that takes the
-graph from 321 nodes to 233. For INT8 it is the other way round, for the streams-and-
-synchronisation reason just above.
+**Static or dynamic shape.** For FP16 at a fixed batch, build static: 0.538 ms against
+0.709 ms for the dynamic engine the batch sweep builds, 32% faster, because dynamic
+shapes block the constant folding that takes the graph from 321 nodes to 233. For INT8
+it is the other way round, for the streams-and-synchronisation reason just above.
 
 ### Where the accuracy goes
 
@@ -437,11 +464,11 @@ result rather than an absence of one: whatever INT8 costs, it is not concentrate
 the small-object regime.
 
 Per *class* the same data will not support a conclusion, and it is worth being explicit
-about why rather than publishing the ranking. Sorting the 75 scored classes by AP lost
+about why rather than publishing the ranking. Sorting the 79 scored classes by AP lost
 puts bear first at -57%, then airplane, fire hydrant, elephant, snowboard. But bear has
 **6** ground-truth instances in these 500 images, snowboard has **2**, fire hydrant and
-stop sign have 8. The median across the ten worst is 15, the median across all scored
-classes is 24, and 30 of the 75 have fewer than 20. That table ranks sampling noise. The
+stop sign have 8. The median across the ten worst is 11.5, the median across all scored
+classes is 25, and 30 of the 79 have fewer than 20. That table ranks sampling noise. The
 aggregate and the size split pool enough instances to mean something; a class-by-class
 answer needs the full 5000-image set, and this subset cannot give one.
 
@@ -517,14 +544,14 @@ INT8 is the point — Jetson in particular — have a different arithmetic-to-ba
 balance. Each configuration was measured in one session as 3 rounds of 300 iterations;
 that captures run-to-run spread within a session and says nothing about spread across
 reboots, driver versions, or thermal states. Runs were short and the GPU stayed between
-39 and 52°C, so nothing here speaks to sustained-load throttling.
+43 and 54°C, so nothing here speaks to sustained-load throttling.
 
 **500 images, not 5000.** The subset scores 0.4008 where the full val2017 scores 0.3651
 — a 0.036 spread, larger than most differences this report discusses. That is workable
 for the comparison being made, since every runtime sees identical images, and it is why
 the mAP column is only ever read as a difference between rows
 ([detail](#what-the-map-numbers-do-and-do-not-mean)). It does not stretch to per-class
-conclusions: 30 of the 75 scored classes have fewer than 20 instances in the subset.
+conclusions: 30 of the 79 scored classes have fewer than 20 instances in the subset.
 
 **Post-training quantization only.** No QAT. The INT8 accuracy figures are the floor of
 what quantization costs, not the best achievable — QAT would likely recover much of the
@@ -542,6 +569,14 @@ GPU and TensorRT version that built it, so every number in the results table req
 local rebuild to reproduce. Rebuilding the same configuration moves mAP by around 0.0001
 to 0.0003 through tactic selection, which sets the floor on differences worth discussing;
 it is why the per-block sweep reports deltas against a same-session baseline.
+
+Latency is the less stable half of that. Between two sweeps on this machine a rebuilt
+plain INT8 engine moved from 2.50 ms to 2.01 ms — 20%, against a round-to-round spread
+inside either sweep of under 0.01 ms, and with the engine's auxiliary-stream count
+unchanged at 5. Nothing else in the table has moved like that across a rebuild, but it
+means a 0.03 ms gap between two engines — the one now separating the INT8 pair — carries
+no weight, and it is why the INT8 latency conclusion is stated against FP16 rather than
+between the two INT8 builds.
 
 **The batch sweep is narrow.** FP16 only, batch 1/4/8, one dynamic engine at
 min 1 / opt 4 / max 8. INT8 across batch was measured separately with trtexec rather than

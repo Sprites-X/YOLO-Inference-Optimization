@@ -282,6 +282,65 @@ So the accuracy is recoverable to within the 3-4% that post-training quantizatio
 normally expected to cost. It just is not worth recovering at batch 1, because each
 block taken out of INT8 also moves the latency back toward FP16's.
 
+**Which objects lose it — and what this subset cannot tell you.** The obvious guess is
+small objects, since they have the least signal to spare. Measured, that is not what
+happens; the loss is close to flat across sizes:
+
+| | FP32 | INT8 | | INT8+FP16head |
+|---|---|---|---|---|
+| small (<32²) | 0.2397 | 0.1926 | -19.6% | 0.2145 (-10.5%) |
+| medium (32-96²) | 0.4249 | 0.3429 | -19.3% | 0.3812 (-10.3%) |
+| large (≥96²) | 0.5592 | 0.4413 | -21.1% | 0.5120 (-8.4%) |
+
+Those buckets pool 1394, 1281 and 857 ground-truth instances, so the flatness is a
+result rather than an absence of one: whatever INT8 costs, it is not concentrated in
+the small-object regime.
+
+Per *class* the same data will not support a conclusion, and it is worth being explicit
+about why rather than publishing the ranking. Sorting the 75 scored classes by AP lost
+puts bear first at -57%, then airplane, fire hydrant, elephant, snowboard. But bear has
+**6** ground-truth instances in these 500 images, snowboard has **2**, fire hydrant and
+stop sign have 8. The median across the ten worst is 15, the median across all scored
+classes is 24, and 30 of the 75 have fewer than 20. That table ranks sampling noise. The
+aggregate and the size split pool enough instances to mean something; a class-by-class
+answer needs the full 5000-image set, and this subset cannot give one.
+
+## Trade-offs and recommendation
+
+**Use TensorRT FP16 at batch 1.** On this hardware it is not a trade at all — it is the
+fastest configuration measured, at baseline accuracy (0.4006 against 0.4008), with the
+lowest VRAM of any GPU row. There is no accuracy being sacrificed for the 2.63x, which
+is the unusual part: the interesting decision this project set out to make turned out
+not to exist.
+
+*If you need throughput.* 699 FPS at batch 1 already covers four 30 FPS cameras nearly
+six times over. Batching to 4 adds 23% and costs about 3x the per-frame latency; batch 8
+adds 1.4% more on top of that and costs 6x. Take batch 4 only if you are genuinely
+throughput-bound and have no per-frame deadline, and stop there.
+
+*If you need accuracy above all.* Stay on FP32 — PyTorch or ONNX Runtime, both 0.4008.
+ONNX Runtime GPU is 1.32x PyTorch for an identical number, so it is the better of the
+two. Note that TensorRT FP16 is within 0.0002 of both, so "accuracy above all" barely
+argues against it either.
+
+*If you need the smallest engine.* FP16 again, at 7.9 MB. The INT8 engines are 51-53 MB
+— quantizing this model makes the artifact 6.6x larger, for the reason in the section
+above.
+
+**When INT8 would be worth revisiting.** Not on this card at this model size, but the
+result is specific enough to say what would change it. INT8 loses here because its
+convolutions are no faster than FP16's, which follows from yolov8n's 16-256 channel
+convolutions being memory-bound rather than arithmetic-bound at 640x640. A larger model,
+a larger input, or hardware with a wider INT8-to-FP16 throughput ratio moves that
+balance. Anyone re-running this on a Jetson or with yolov8m should expect a different
+answer, and the per-block sweep and `--fp16-prefix` are in the repository to redo the
+analysis rather than repeat the reasoning.
+
+**What not to conclude.** That INT8 is bad. It is dominated *here*, at batch 1, on a
+consumer Blackwell card, for a 3.2M-parameter model — and one static-shape build of it
+is 10x the size of the dynamic-shape build of the same graph, which suggests part of
+the penalty is the builder rather than the precision.
+
 ## Verified environment
 Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /
 TensorRT 10.16.1.11 / Python 3.10.12.
@@ -400,7 +459,53 @@ set — a 0.036 spread, which is large. mAP over 500 images is noisy, so the sub
 figure is only ever used to compare runtimes against each other on identical
 images. It is not comparable to any published number, including the one above.
 
-Results and analysis to follow.
+## Limitations
+
+What these numbers do not establish, in rough order of how much it should change your
+reading of them.
+
+**One desktop GPU, one machine, one run each.** Everything here is an RTX 5060 on one
+desktop. The INT8 result especially should not be carried to other hardware: it loses
+here because yolov8n's convolutions are memory-bound at this size, and edge parts where
+INT8 is the point — Jetson in particular — have a different arithmetic-to-bandwidth
+balance. Each configuration was measured in one session as 3 rounds of 300 iterations;
+that captures run-to-run spread within a session and says nothing about spread across
+reboots, driver versions, or thermal states. Runs were short and the GPU stayed between
+39 and 52°C, so nothing here speaks to sustained-load throttling.
+
+**500 images, not 5000.** The subset scores 0.4008 where the full val2017 scores 0.3651
+— a 0.036 spread, larger than most differences this report discusses. That is workable
+for the comparison being made, since every runtime sees identical images, and it is why
+the mAP column is only ever read as a difference between rows
+([detail](#what-the-map-numbers-do-and-do-not-mean)). It does not stretch to per-class
+conclusions: 30 of the 75 scored classes have fewer than 20 instances in the subset.
+
+**Post-training quantization only.** No QAT. The INT8 accuracy figures are the floor of
+what quantization costs, not the best achievable — QAT would likely recover much of the
+21.8%, and would not change the latency finding, which is what actually rules INT8 out
+here.
+
+**The accuracy is not comparable to `yolo val`.** A deliberately simpler shared
+postprocess accounts for a ~0.9 point gap against the published figure, so absolute
+accuracy here is internally consistent rather than externally comparable — see
+[what the mAP numbers mean](#what-the-map-numbers-do-and-do-not-mean) for the full
+account.
+
+**Engines are not portable, and not bit-reproducible.** A TensorRT engine is tied to the
+GPU and TensorRT version that built it, so every number in the results table requires a
+local rebuild to reproduce. Rebuilding the same configuration moves mAP by around 0.0001
+to 0.0003 through tactic selection, which sets the floor on differences worth discussing;
+it is why the per-block sweep reports deltas against a same-session baseline.
+
+**The batch sweep is narrow.** FP16 only, batch 1/4/8, one dynamic engine at
+min 1 / opt 4 / max 8. INT8 across batch was measured separately with trtexec rather than
+as reported rows. Nothing above batch 8 was tried.
+
+**Two findings are described rather than explained.** The static-shape INT8 engine is 10x
+the size of the dynamic-shape build of the same graph and slower despite it; that is
+localised to kernel size and a 6-stream fan-out, but why the builder makes that choice is
+unknown. And ONNX Runtime on CPU coming out slower than PyTorch on CPU is reported
+without investigation.
 
 ## License
 

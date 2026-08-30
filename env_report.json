@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-30T09:29:20.309129+00:00",
+  "checked_at": "2026-08-30T12:25:34.883757+00:00",
   "checks": {
     "PYTHONPATH": {
       "status": "pass",
@@ -7,7 +7,7 @@
     },
     "nvidia-smi": {
       "status": "pass",
-      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 38 | 145.00 W | 3090 MHz"
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 37 | 145.00 W | 3090 MHz"
     },
     "driver >= 570": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul succeeded (checksum 1280.3)"
+      "detail": "matmul succeeded (checksum -6048.9)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -74,12 +74,12 @@
       "detail": "2.0.11"
     },
     "pip on PATH": {
-      "status": "warn",
-      "detail": "/home/sprites/.local/bin/pip is outside this venv — use `python -m pip` so installs land here and not in ~/.local"
+      "status": "pass",
+      "detail": ".venv/bin/pip"
     },
     "yolo CLI": {
-      "status": "warn",
-      "detail": "/home/sprites/.local/bin/yolo is outside this venv (says '8.4.104', venv has '8.4.126') — running `yolo export` by hand would use that one"
+      "status": "pass",
+      "detail": ".venv/bin/yolo"
     },
     "CPU governor": {
       "status": "pass",
@@ -87,7 +87,7 @@
     },
     "GPU state now": {
       "status": "pass",
-      "detail": "P1, 2550 MHz"
+      "detail": "P1, 2557 MHz"
     },
     "system": {
       "status": "pass",

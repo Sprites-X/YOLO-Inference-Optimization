@@ -58,6 +58,11 @@ numpy>=1.26.0
 pycocotools>=2.0.11     # >=2.0.11 is the first version compatible with numpy 2.x
 matplotlib>=3.8.0       # make_report.py uses it for the figures
 
+# --- tests ---------------------------------------------------------------
+# Only needed to run tests/. Nothing in the measurement path imports it, so a venv
+# without pytest still benchmarks — run_all.sh skips the step and says so.
+pytest>=8.0.0
+
 # --- notes ---------------------------------------------------------------
 # torch / torchvision are deliberately not listed here — they have to come from
 # the pytorch.org index first (see step 1). List them and pip pulls the CPU build

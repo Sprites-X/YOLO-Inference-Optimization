@@ -61,6 +61,21 @@ fi
 echo "=== environment ==="
 python verify_env.py || { echo "fix the failures before going further"; exit 1; }
 
+echo "=== unit tests ==="
+# Gates the shared code the way verify_env.py gates the environment and check_parity.py
+# gates the exports. A fault in common.py moves every row of the table together, so
+# nothing downstream would reveal it: check_parity compares the runtimes against each
+# other and would stay green through all of it.
+#
+# Skipped rather than fatal when pytest is absent — nothing in the measurement path
+# imports it, so a venv without it still benchmarks correctly.
+if python -c 'import pytest' 2>/dev/null; then
+    python -m pytest tests/ -q \
+        || { echo "unit tests failed — fix those before measuring"; exit 1; }
+else
+    echo "  pytest not installed, skipping (python -m pip install pytest)"
+fi
+
 echo "=== export ==="
 # Dynamic first, then static. `yolo export` always writes yolov8n.onnx, so doing it the
 # other way round leaves the dynamic graph sitting in the static file's name and the

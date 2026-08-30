@@ -209,12 +209,26 @@ a broken artifact. To follow it without the TensorRT build log:
 
 **`--fresh` is what keeps the table yours.** Both `benchmark.py` and `evaluate.py`
 open their output with `"a"`, and this repository ships the rows measured here, so a
-plain `./run_all.sh` appends to them and the report prints every config twice — two
-machines' numbers in one table. `--fresh` removes `results.jsonl` first
+plain `./run_all.sh` appends to them — your numbers and this machine's in one file.
+`make_report.py` collapses each config to its newest measurement and names what it
+collapsed, so the table is not doubled either way, but the superseded rows are still
+sitting in the file. `--fresh` removes `results.jsonl` first
 (`git checkout results.jsonl` puts it back) and *trims* rather than deletes
 `accuracy.jsonl`, because that file holds two rows the pipeline never regenerates: the
 full-val2017 reference and ONNX Runtime on CPU. Running without it warns rather than
 silently doing the wrong thing.
+
+**The tests run first.** `run_all.sh` runs them before it exports anything, and they
+take under a second:
+
+    python -m pytest tests/ -q
+
+They cover the shared preprocess and postprocess, the percentile and per-image
+statistics the table is built from, the seeded image-set selection, and the report
+join. Those are the pieces every row passes through *together*, which is exactly what
+`check_parity.py` cannot see — it compares the runtimes against each other, so a fault
+in the code all three share leaves it green. pytest is the only dependency here that
+the measurement path does not import; without it the step is skipped rather than fatal.
 
 **Your numbers will not match the ones above, and that is expected.** A TensorRT engine
 is built for one GPU and one TensorRT version, so different hardware gives different
@@ -569,6 +583,7 @@ runs them:
 | `evaluate.py` | Accuracy: COCO mAP via pycocotools. Appends to `accuracy.jsonl`. |
 | `make_report.py` | Joins those two files into `report_table.md` and the figures. |
 | `common.py` | Shared preprocess and postprocess. Every runtime calls the same one — that is what makes the comparison a comparison. |
+| `tests/` | Unit tests for the shared code and the joins every row depends on. Run by `run_all.sh` before it measures. |
 
 `train_pool_manifest.txt` and `env_report.json` are committed so a clone can
 reproduce the same image pool and see what the numbers were measured on.

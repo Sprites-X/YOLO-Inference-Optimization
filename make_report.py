@@ -169,12 +169,26 @@ def main():
     ax.bar(x + w / 2, p99, w, label="p99", color="#F58518")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontsize=8)
-    ax.set_ylabel("Latency per image (ms) — lower is better")
+    ax.set_ylabel("Latency per image (ms) — lower is better, log scale")
     ax.set_title("Inference latency: p50 vs p99")
+    # Log scale because the CPU rows are ~15x the GPU rows. On a linear axis the five
+    # GPU bars collapse into one indistinguishable clump at the bottom — 1.4 ms and
+    # 2.8 ms are a 2x difference and the whole point of the chart, and they looked
+    # identical. Log keeps every row on one axis and readable.
+    ax.set_yscale("log")
+    # A log axis defaults to labelling only the decades, which here is the single tick
+    # "10^1" — useless for reading a value off. Label the actual range instead.
+    ticks = [t for t in (1, 2, 3, 5, 10, 20, 30, 50) if t <= max(p99) * 1.5]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([str(t) for t in ticks])
+    ax.minorticks_off()
     ax.legend()
-    ax.grid(axis="y", alpha=0.3)
-    for i, v in enumerate(p50):
-        ax.text(i - w / 2, v, f"{v:.1f}", ha="center", va="bottom", fontsize=7)
+    ax.grid(axis="y", alpha=0.3, which="both")
+    # Both series get a number, since on a log axis the bar heights no longer let you
+    # read the ratio off the picture.
+    for i, (a, b) in enumerate(zip(p50, p99)):
+        ax.text(i - w / 2, a, f"{a:.1f}", ha="center", va="bottom", fontsize=7)
+        ax.text(i + w / 2, b, f"{b:.1f}", ha="center", va="bottom", fontsize=7)
     fig.tight_layout()
     fig.savefig(outdir / "fig_latency.png", dpi=150)
     print(f"-> {outdir/'fig_latency.png'}")
@@ -185,12 +199,28 @@ def main():
     pts = [(r, acc_map[key_of(r)]) for r in results if key_of(r) in acc_map]
     if pts:
         fig, ax = plt.subplots(figsize=(7, 5.5))
+        # Points near the top of the range had their labels drawn over the title, and
+        # two GPU rows at similar accuracy overprinted each other. Labelling below the
+        # marker for the highest-scoring rows separates both cases.
+        # The near-lossless rows all sit within a hair of the same mAP, so their labels
+        # would print over each other however they are anchored. They get dropped below
+        # the marker (clear of the title) and stepped down in turn, left to right.
+        top = max(a["mAP50_95"] for _, a in pts)
+        high_x = sorted(r["fps"] for r, a in pts if a["mAP50_95"] > top - 0.005)
         for r, a in pts:
             ax.scatter(r["fps"], a["mAP50_95"], s=110, zorder=3)
             b = r.get("batch", 1)
             tag = f"{r['runtime']} {r['precision']}\n{r['device']}" + (f" b{b}" if b > 1 else "")
-            ax.annotate(tag, (r["fps"], a["mAP50_95"]),
-                        textcoords="offset points", xytext=(8, 6), fontsize=8)
+            if a["mAP50_95"] > top - 0.005:
+                # Three levels, not two: the batch sweep puts four near-lossless points
+                # into the top-right corner and a two-level stagger still overlapped.
+                dy = -24 - 20 * (high_x.index(r["fps"]) % 3)
+                ax.annotate(tag, (r["fps"], a["mAP50_95"]), textcoords="offset points",
+                            xytext=(0, dy), fontsize=8, ha="center")
+            else:
+                ax.annotate(tag, (r["fps"], a["mAP50_95"]), textcoords="offset points",
+                            xytext=(0, 10), fontsize=8, ha="center")
+        ax.margins(x=0.16, y=0.16)
         ax.set_xlabel("Throughput (FPS) — higher is better")
         ax.set_ylabel("mAP50-95 — higher is better")
         ax.set_title("Accuracy vs Speed trade-off")

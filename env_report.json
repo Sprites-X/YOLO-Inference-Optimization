@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-25T08:11:07.352847+00:00",
+  "checked_at": "2026-08-30T06:49:37.440258+00:00",
   "checks": {
     "PYTHONPATH": {
       "status": "pass",
@@ -7,7 +7,7 @@
     },
     "nvidia-smi": {
       "status": "pass",
-      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 37 | 145.00 W | 3090 MHz"
+      "detail": "NVIDIA GeForce RTX 5060 | 595.84 | 8151 MiB | 38 | 145.00 W | 3090 MHz"
     },
     "driver >= 570": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul succeeded (checksum -7438.0)"
+      "detail": "matmul succeeded (checksum 2924.9)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -79,7 +79,7 @@
     },
     "GPU state now": {
       "status": "pass",
-      "detail": "P1, 2557 MHz"
+      "detail": "P1, 2542 MHz"
     },
     "system": {
       "status": "pass",

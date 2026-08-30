@@ -2,30 +2,99 @@
 
 Benchmarking YOLOv8n across PyTorch / ONNX Runtime /
 TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
+TensorRT FP16 reaches 699 FPS, 2.63x PyTorch on the same GPU, at the same accuracy.
 
-**Status:** PyTorch baseline measured on 500 COCO val2017 images. ONNX (static and
-dynamic) and TensorRT FP16 exported and checked against that baseline. INT8 built,
-scored, and measured across batch 1/8/16 — on this card it is slower than FP16 as well
-as less accurate at every batch size, so FP16 is the configuration to use; see
-[INT8: what it costs](#int8-what-it-costs). The full latency table across all runtimes
-is still to come.
+**Status:** Complete for batch 1. All seven configurations measured in one run —
+PyTorch, ONNX Runtime and TensorRT across CPU and GPU, each checked against the PyTorch
+baseline before being timed. TensorRT FP16 wins at 2.63x PyTorch GPU for 0.0002 mAP.
+INT8 was also measured across batch 1/8/16 and is slower than FP16 as well as less
+accurate at every one; see [INT8: what it costs](#int8-what-it-costs). Batching is
+swept at 1/4/8 and buys 25% throughput for roughly 6x the per-frame latency, which this
+workload does not need.
 
-## Baseline (YOLOv8n, 640x640, batch 1)
+## Results (YOLOv8n, 640x640)
 
-| Runtime | Device | Precision | Images | p50 (ms) | p99 (ms) | FPS | mAP50-95 |
-|---|---|---|---|---|---|---|---|
-| PyTorch | RTX 5060 | FP32 | 500 | 3.76 | 4.54 | 261.9 | 0.4008 |
-| PyTorch | Ryzen 5 7500F | FP32 | 500 | 21.56 | 26.76 | 45.4 | — |
-| PyTorch | RTX 5060 | FP32 | 5000 (full val2017) | — | — | — | 0.3651 |
+| Runtime | Precision | Device | p50 (ms) | p99 (ms) | FPS | E2E (ms) | mAP50-95 | Size (MB) | VRAM (MB) | vs PyTorch GPU |
+|---|---|---|---|---|---|---|---|---|---|---|
+| TensorRT | FP16 | RTX 5060 | **1.43** | 1.49 | **699.4** | 3.62 | 0.4006 | 7.9 | 189 | **2.63x** |
+| TensorRT | INT8+FP16head | RTX 5060 | 2.04 | 2.10 | 488.7 | 5.39 | 0.3579 | 51.3 | 250 | 1.84x |
+| TensorRT | INT8 | RTX 5060 | 2.50 | 2.58 | 399.1 | 5.76 | 0.3136 | 52.7 | 281 | 1.50x |
+| ONNX Runtime | FP32 | RTX 5060 | 2.81 | 3.10 | 352.2 | 5.97 | 0.4008 | 12.3 | 212 | 1.32x |
+| PyTorch | FP32 | RTX 5060 | 3.72 | 4.26 | 266.1 | 6.22 | 0.4008 | 6.2 | 208 | 1.00x |
+| PyTorch | FP32 | Ryzen 5 7500F | 22.11 | 30.11 | 43.8 | 24.89 | — | 6.2 | — | 0.16x |
+| ONNX Runtime | FP32 | Ryzen 5 7500F | 27.16 | 43.43 | 34.6 | 32.14 | 0.4008 | 12.3 | — | 0.13x |
 
-Latency is inference-only, CUDA-synchronised, mean of 3 runs of 300 iterations
-(CPU: 100) after 50 warm-up iterations, over the 500-image set. GPU is 5.8x the
-CPU baseline. The 5000-image row is accuracy only — a full-val2017 reference
-point, not a separate latency measurement.
+A full-val2017 accuracy reference, not a latency measurement: PyTorch FP32 on all 5000
+images scores 0.3651. See [what the mAP numbers mean](#what-the-map-numbers-do-and-do-not-mean).
+
+**TensorRT FP16 is the configuration to use.** It is 2.63x PyTorch on the same GPU, uses
+the least VRAM of any GPU row, and gives up 0.0002 mAP. Both INT8 variants are slower
+than FP16 *and* less accurate — [why that happens](#int8-what-it-costs) is its own
+section. The GPU is 5.9x the PyTorch CPU baseline, and ONNX Runtime on CPU is slower
+than PyTorch on CPU, which is the one result here that runs against the usual
+expectation that an exported graph beats an eager one.
+
+![Inference latency, p50 vs p99, by runtime and precision](fig_latency.png)
+
+![Accuracy against throughput for every configuration](fig_tradeoff.png)
+
+The trade-off plot is the argument in one picture: TensorRT FP16 sits top-right, fastest
+*and* at baseline accuracy, so nothing here trades accuracy for speed usefully. Both
+INT8 points sit down and to the left of it — giving up mAP and getting less throughput
+for it.
+
+Latency is one full inference cycle — host-to-device, execute, device-to-host, then
+synchronise — mean of 3 runs of 300 iterations (CPU: 100) after 50 warm-up iterations,
+over the 500-image set. That is the per-frame cost a real caller pays, and it is
+deliberately not the same measurement `trtexec --noDataTransfers` reports in the INT8
+section below; the two differ by more than transfer time, for a reason worth knowing:
+
+| engine | auxiliary streams | trtexec, pipelined | this table, serialised | difference |
+|---|---|---|---|---|
+| FP16 | 2 | 0.542 ms | 1.43 ms | 0.89 ms |
+| INT8+FP16head | 2 | 1.148 ms | 2.04 ms | 0.89 ms |
+| INT8 | **5** | 1.115 ms | 2.50 ms | **1.39 ms** |
+
+trtexec measures steady-state throughput, where an engine's auxiliary streams overlap
+across consecutive inferences. A per-frame pipeline cannot use that overlap and pays to
+synchronise those streams on every call. Both engines with 2 auxiliary streams pay the
+same 0.89 ms; the one with 5 pays half a millisecond more. It reverses the ranking of
+the two INT8 engines — pipelined, plain INT8 looks slightly faster than the head-pinned
+one; per frame, it is half a millisecond slower. Pinning the detect head back to FP16
+drops the engine from 5 auxiliary streams to 2, so it buys latency as well as accuracy.
+Neither measurement changes the headline: FP16 wins under both.
+
+### Does batching help?
+
+Batch 1 answers "how fast is one frame". It cannot answer "will this card keep up with
+four 30 FPS cameras", which needs throughput at batch — and the per-frame cost of
+getting it. FP16 only, since INT8 already loses to it at every batch size.
+
+| batch | ms per image | img/s | GPU time for the batch |
+|---|---|---|---|
+| 1 | 1.60 | 624.5 | 1.6 ms |
+| 4 | 1.28 | 770.1 | **5.1 ms** |
+| 8 | 1.28 | 781.1 | **10.2 ms** |
+
+**The per-image column is the throughput view and it flatters batching.** Batch 8 looks
+20% cheaper per image, but a frame does not get its result after 1.28 ms — the batch
+takes 1.28 x 8 = 10.2 ms of GPU time, and no frame in it is done until that finishes,
+before counting however long the batch took to fill. So batch 8 buys 25% more
+throughput for roughly 6x the per-frame latency, and almost all of that throughput
+arrives by batch 4; the step from 4 to 8 is worth 1.4%.
+
+For a per-frame deadline, batch 1 is the right answer on this card. Note also that the
+batch-1 row here is 1.60 ms against the static engine's 1.43 ms — the sweep uses a
+dynamic-shape engine, and that flexibility costs 12% even when you feed it one image.
+
+To the original question: four cameras at 30 FPS is 120 FPS, and static FP16 at batch 1
+delivers 699. Nearly 6x headroom without batching at all, so the interesting constraint
+on this card is not throughput.
 
 mAP is measured at conf 0.001 / IoU 0.7 as COCO AP requires; the latency rows use
 deploy thresholds (0.25 / 0.45) — see `common.py` for why these differ on
-purpose.
+purpose. Every row was measured in one `./run_all.sh` run with the CPU governor on
+`performance`, recorded per row in `results.jsonl`.
 
 ## Export parity
 
@@ -103,9 +172,12 @@ shift is obvious — is what actually judges them.
 ## INT8: what it costs
 
 On this GPU, **INT8 is slower than FP16 as well as less accurate, at every batch size
-measured**, so it is dominated outright. Timings are `trtexec --noDataTransfers`, which
-isolates GPU compute from the host transfers that otherwise mask the difference;
-throughput is per image, so batched rows are comparable to batch 1.
+measured**, so it is dominated outright. Timings here are `trtexec --noDataTransfers`,
+an independent tool measuring steady-state throughput, chosen so this conclusion does
+not rest on the same harness that produced the results table; throughput is per image,
+so batched rows are comparable to batch 1. They are pipelined numbers and so run faster
+than the per-frame figures in the [results table](#results-yolov8n-640x640) —
+the two are reconciled there, and FP16 wins under both.
 
 | Engine | batch | median | img/s | vs FP16 | mAP50-95 |
 |---|---|---|---|---|---|

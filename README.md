@@ -4,13 +4,12 @@ Benchmarking YOLOv8n across PyTorch / ONNX Runtime /
 TensorRT FP16 / TensorRT INT8 on RTX 5060 (Blackwell, sm_120).
 TensorRT FP16 reaches 699 FPS, 2.63x PyTorch on the same GPU, at the same accuracy.
 
-**Status:** Complete for batch 1. All seven configurations measured in one run —
-PyTorch, ONNX Runtime and TensorRT across CPU and GPU, each checked against the PyTorch
-baseline before being timed. TensorRT FP16 wins at 2.63x PyTorch GPU for 0.0002 mAP.
-INT8 was also measured across batch 1/8/16 and is slower than FP16 as well as less
-accurate at every one; see [INT8: what it costs](#int8-what-it-costs). Batching is
-swept at 1/4/8 and buys 25% throughput for roughly 6x the per-frame latency, which this
-workload does not need.
+**Status:** Complete. Seven configurations measured in a single run across CPU and GPU,
+each checked against the PyTorch baseline before being timed, plus a batch sweep at
+1/4/8. The result that did not go as expected: INT8 is slower than FP16 *and* less
+accurate, at every batch size tried — so the accuracy-for-speed trade this project set
+out to characterise turns out not to exist on this hardware. See
+[INT8: what it costs](#int8-what-it-costs).
 
 ## Results (YOLOv8n, 640x640)
 
@@ -95,6 +94,133 @@ mAP is measured at conf 0.001 / IoU 0.7 as COCO AP requires; the latency rows us
 deploy thresholds (0.25 / 0.45) — see `common.py` for why these differ on
 purpose. Every row was measured in one `./run_all.sh` run with the CPU governor on
 `performance`, recorded per row in `results.jsonl`.
+
+## Trade-offs and recommendation
+
+**Use TensorRT FP16 at batch 1.** On this hardware it is not a trade at all — it is the
+fastest configuration measured, at baseline accuracy (0.4006 against 0.4008), with the
+lowest VRAM of any GPU row. There is no accuracy being sacrificed for the 2.63x, which
+is the unusual part: the interesting decision this project set out to make turned out
+not to exist.
+
+*If you need throughput.* 699 FPS at batch 1 already covers four 30 FPS cameras nearly
+six times over. Batching to 4 adds 23% and costs about 3x the per-frame latency; batch 8
+adds 1.4% more on top of that and costs 6x. Take batch 4 only if you are genuinely
+throughput-bound and have no per-frame deadline, and stop there.
+
+*If you need accuracy above all.* Stay on FP32 — PyTorch or ONNX Runtime, both 0.4008.
+ONNX Runtime GPU is 1.32x PyTorch for an identical number, so it is the better of the
+two. Note that TensorRT FP16 is within 0.0002 of both, so "accuracy above all" barely
+argues against it either.
+
+*If you need the smallest engine.* FP16 again, at 7.9 MB. The INT8 engines are 51-53 MB
+— quantizing this model makes the artifact 6.6x larger, for the reason under
+[why INT8 is slower](#why-int8-is-slower).
+
+**When INT8 would be worth revisiting.** Not on this card at this model size, but the
+result is specific enough to say what would change it. INT8 loses here because its
+convolutions are no faster than FP16's, which follows from yolov8n's 16-256 channel
+convolutions being memory-bound rather than arithmetic-bound at 640x640. A larger model,
+a larger input, or hardware with a wider INT8-to-FP16 throughput ratio moves that
+balance. Anyone re-running this on a Jetson or with yolov8m should expect a different
+answer, and the per-block sweep and `--fp16-prefix` are in the repository to redo the
+analysis rather than repeat the reasoning.
+
+**What not to conclude.** That INT8 is bad. It is dominated *here*, at batch 1, on a
+consumer Blackwell card, for a 3.2M-parameter model — and one static-shape build of it
+is 10x the size of the dynamic-shape build of the same graph, which suggests part of
+the penalty is the builder rather than the precision.
+
+## Setup
+
+    git clone git@github.com:Sprites-X/YOLO-Inference-Optimization.git
+    cd YOLO-Inference-Optimization/yolo-bench
+    ./setup.sh
+
+That is the whole thing: virtual environment, dependencies, both COCO subsets, and the
+environment check. It is safe to re-run — every step skips itself if already done — and
+it stops at the first failure rather than half-configuring. Budget ~1.4 GB of downloads.
+Use `PYTHON=/path/to/python3.11 ./setup.sh` if `python3` is not the interpreter you want.
+
+**Prerequisites it cannot install for you:** an NVIDIA GPU, a driver new enough for it
+(570+ on Blackwell, 525+ otherwise — `verify_env.py` checks against your actual card),
+and Python 3.10 or newer. `trtexec` is optional; it ships in the TensorRT GA tarball
+rather than the pip wheel, and only the independent cross-check in the INT8 section
+uses it.
+
+Then measure:
+
+    source .venv/bin/activate
+    ./run_all.sh --fresh
+
+### Doing it by hand
+
+`requirements.lock.txt` pins versions but not the non-PyPI indexes. `torch` and
+`torchvision` are pinned to `+cu128` builds, which exist only on the PyTorch index —
+plain PyPI returns 404 for them — so they go first:
+
+    python -m pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 \
+        --index-url https://download.pytorch.org/whl/cu128
+    python -m pip install --extra-index-url https://pypi.nvidia.com \
+        tensorrt-cu12==10.16.1.11 tensorrt-cu12-libs==10.16.1.11 \
+        tensorrt-cu12-bindings==10.16.1.11
+    python -m pip install -r requirements.lock.txt
+
+Once those two are installed, the lock file resolves without needing either index
+again: pip treats an already-satisfied pin as satisfied and never looks it up.
+
+Then the two image sets — 500 from val2017 to measure on, 2000 from train2017 to
+calibrate INT8 with:
+
+    curl -O http://images.cocodataset.org/zips/val2017.zip
+    curl -O http://images.cocodataset.org/annotations/annotations_trainval2017.zip
+    unzip val2017.zip -d data/
+    unzip -j annotations_trainval2017.zip annotations/instances_val2017.json -d annotations/
+    python prepare_data.py --src data/val2017
+    python fetch_train_pool.py          # ~315 MB, one file at a time
+
+**`python -m pip`, not bare `pip`.** Activating a venv puts `.venv/bin` on PATH but does
+not guarantee it wins — if `~/.local/bin` sits ahead of it, bare `pip` is the *user*
+pip and installs into `~/.local`, which a venv does not read (`ENABLE_USER_SITE` is
+false inside one). The install appears to succeed and then `verify_env.py` reports the
+packages missing. `python -m pip` always targets the interpreter you are running, so it
+cannot land somewhere else. Same failure as bare `yolo` picking up a different
+ultralytics; `verify_env.py` checks for both.
+
+Then run `python verify_env.py` — it must report zero failures. A WARN is survivable;
+`trtexec` is the usual one, and it only matters for the independent cross-check behind
+the INT8 section, not for the pipeline.
+
+The model weights are not in the repository and are not a step here: ultralytics fetches
+`yolov8n.pt` itself the first time `run_all.sh` exports it. Nothing to do, but it does
+mean the first run reaches out to the network.
+
+## Reproduce
+
+With the environment and data in place:
+
+    source .venv/bin/activate     # not .venv/bin/python — activate it
+    ./run_all.sh --fresh
+
+It takes roughly 20 minutes and stops at the first failure rather than carrying on with
+a broken artifact. To follow it without the TensorRT build log:
+
+    ./run_all.sh 2>&1 | tee sweep.log | grep -E "^===|^\[(PASS|FAIL|UNGATED)\]|mAP50-95 ="
+
+**`--fresh` is what keeps the table yours.** Both `benchmark.py` and `evaluate.py`
+open their output with `"a"`, and this repository ships the rows measured here, so a
+plain `./run_all.sh` appends to them and the report prints every config twice — two
+machines' numbers in one table. `--fresh` removes `results.jsonl` first
+(`git checkout results.jsonl` puts it back) and *trims* rather than deletes
+`accuracy.jsonl`, because that file holds two rows the pipeline never regenerates: the
+full-val2017 reference and ONNX Runtime on CPU. Running without it warns rather than
+silently doing the wrong thing.
+
+**Your numbers will not match the ones above, and that is expected.** A TensorRT engine
+is built for one GPU and one TensorRT version, so different hardware gives different
+latency outright. Even rebuilding on this machine moves mAP by 0.0001 to 0.0003 through
+tactic selection. What should reproduce is the shape of the result — the ordering of the
+rows, FP16 beating INT8 on both axes, the size of the gaps — not the digits.
 
 ## Export parity
 
@@ -305,198 +431,6 @@ classes is 24, and 30 of the 75 have fewer than 20. That table ranks sampling no
 aggregate and the size split pool enough instances to mean something; a class-by-class
 answer needs the full 5000-image set, and this subset cannot give one.
 
-## Trade-offs and recommendation
-
-**Use TensorRT FP16 at batch 1.** On this hardware it is not a trade at all — it is the
-fastest configuration measured, at baseline accuracy (0.4006 against 0.4008), with the
-lowest VRAM of any GPU row. There is no accuracy being sacrificed for the 2.63x, which
-is the unusual part: the interesting decision this project set out to make turned out
-not to exist.
-
-*If you need throughput.* 699 FPS at batch 1 already covers four 30 FPS cameras nearly
-six times over. Batching to 4 adds 23% and costs about 3x the per-frame latency; batch 8
-adds 1.4% more on top of that and costs 6x. Take batch 4 only if you are genuinely
-throughput-bound and have no per-frame deadline, and stop there.
-
-*If you need accuracy above all.* Stay on FP32 — PyTorch or ONNX Runtime, both 0.4008.
-ONNX Runtime GPU is 1.32x PyTorch for an identical number, so it is the better of the
-two. Note that TensorRT FP16 is within 0.0002 of both, so "accuracy above all" barely
-argues against it either.
-
-*If you need the smallest engine.* FP16 again, at 7.9 MB. The INT8 engines are 51-53 MB
-— quantizing this model makes the artifact 6.6x larger, for the reason in the section
-above.
-
-**When INT8 would be worth revisiting.** Not on this card at this model size, but the
-result is specific enough to say what would change it. INT8 loses here because its
-convolutions are no faster than FP16's, which follows from yolov8n's 16-256 channel
-convolutions being memory-bound rather than arithmetic-bound at 640x640. A larger model,
-a larger input, or hardware with a wider INT8-to-FP16 throughput ratio moves that
-balance. Anyone re-running this on a Jetson or with yolov8m should expect a different
-answer, and the per-block sweep and `--fp16-prefix` are in the repository to redo the
-analysis rather than repeat the reasoning.
-
-**What not to conclude.** That INT8 is bad. It is dominated *here*, at batch 1, on a
-consumer Blackwell card, for a 3.2M-parameter model — and one static-shape build of it
-is 10x the size of the dynamic-shape build of the same graph, which suggests part of
-the penalty is the builder rather than the precision.
-
-## Verified environment
-Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /
-TensorRT 10.16.1.11 / Python 3.10.12.
-Full detail in `env_report.json`, exact packages in `requirements.lock.txt`.
-
-ONNX Runtime's CUDA provider links libraries that pip installs under
-`site-packages/nvidia/*/lib`, where the dynamic loader does not look, so `benchmark.py`
-dlopens them before opening a session. Without that, ORT found CUDA only when torch had
-been imported first — which `verify_env.py` did, so it reported PASS while
-`evaluate.py --runtime onnx --device cuda` could not get a GPU session at all. That
-check now runs in a subprocess with no torch in it.
-
-## What's here
-
-`./run_all.sh` does the whole pipeline end to end — see [Reproduce](#reproduce) for the
-two things to do before running it a second time. The individual steps, in the order it
-runs them:
-
-| | |
-|---|---|
-| `setup.sh` | One-command setup from a clone: venv, dependencies, datasets, gate. Idempotent. |
-| `verify_env.py` | Gate before measuring anything. Checks what fails silently: ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels. Writes `env_report.json`. |
-| `prepare_data.py` | Deterministic 500-image measurement set from val2017. |
-| `fetch_train_pool.py` | Pulls the train2017 pool used for INT8 calibration. |
-| `build_engine.py` | TensorRT 10 builder, with a real INT8 calibrator and a fingerprinted calibration cache. `--fp16-prefix` pins named blocks back to FP16; `--detailed-layers` keeps per-layer info for profiling. |
-| `check_parity.py` | The gate between export and measurement. Same images through every runtime, detections compared against PyTorch. |
-| `benchmark.py` | Latency: warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs. Appends to `results.jsonl`. |
-| `evaluate.py` | Accuracy: COCO mAP via pycocotools. Appends to `accuracy.jsonl`. |
-| `make_report.py` | Joins those two files into `report_table.md` and the figures. |
-| `common.py` | Shared preprocess and postprocess. Every runtime calls the same one — that is what makes the comparison a comparison. |
-
-`train_pool_manifest.txt` and `env_report.json` are committed so a clone can
-reproduce the same image pool and see what the numbers were measured on.
-
-## Setup
-
-    git clone git@github.com:Sprites-X/YOLO-Inference-Optimization.git
-    cd YOLO-Inference-Optimization/yolo-bench
-    ./setup.sh
-
-That is the whole thing: virtual environment, dependencies, both COCO subsets, and the
-environment check. It is safe to re-run — every step skips itself if already done — and
-it stops at the first failure rather than half-configuring. Budget ~1.4 GB of downloads.
-Use `PYTHON=/path/to/python3.11 ./setup.sh` if `python3` is not the interpreter you want.
-
-**Prerequisites it cannot install for you:** an NVIDIA GPU, a driver new enough for it
-(570+ on Blackwell, 525+ otherwise — `verify_env.py` checks against your actual card),
-and Python 3.10 or newer. `trtexec` is optional; it ships in the TensorRT GA tarball
-rather than the pip wheel, and only the independent cross-check in the INT8 section
-uses it.
-
-Then measure:
-
-    source .venv/bin/activate
-    ./run_all.sh --fresh
-
-### Doing it by hand
-
-`requirements.lock.txt` pins versions but not the non-PyPI indexes. `torch` and
-`torchvision` are pinned to `+cu128` builds, which exist only on the PyTorch index —
-plain PyPI returns 404 for them — so they go first:
-
-    python -m pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 \
-        --index-url https://download.pytorch.org/whl/cu128
-    python -m pip install --extra-index-url https://pypi.nvidia.com \
-        tensorrt-cu12==10.16.1.11 tensorrt-cu12-libs==10.16.1.11 \
-        tensorrt-cu12-bindings==10.16.1.11
-    python -m pip install -r requirements.lock.txt
-
-Once those two are installed, the lock file resolves without needing either index
-again: pip treats an already-satisfied pin as satisfied and never looks it up.
-
-**`python -m pip`, not bare `pip`.** Activating a venv puts `.venv/bin` on PATH but does
-not guarantee it wins — if `~/.local/bin` sits ahead of it, bare `pip` is the *user*
-pip and installs into `~/.local`, which a venv does not read (`ENABLE_USER_SITE` is
-false inside one). The install appears to succeed and then `verify_env.py` reports the
-packages missing. `python -m pip` always targets the interpreter you are running, so it
-cannot land somewhere else. Same failure as bare `yolo` picking up a different
-ultralytics; `verify_env.py` checks for both.
-
-Then run `python verify_env.py` — it must report zero failures. A WARN is survivable;
-`trtexec` is the usual one, and it only matters for the independent cross-check behind
-the INT8 section, not for the pipeline.
-
-The model weights are not in the repository and are not a step here: ultralytics fetches
-`yolov8n.pt` itself the first time `run_all.sh` exports it. Nothing to do, but it does
-mean the first run reaches out to the network.
-
-## Data
-
-Measurement set — 500 images from val2017:
-
-    curl -O http://images.cocodataset.org/zips/val2017.zip
-    curl -O http://images.cocodataset.org/annotations/annotations_trainval2017.zip
-    unzip val2017.zip -d data/
-    unzip -j annotations_trainval2017.zip annotations/instances_val2017.json -d annotations/
-    python prepare_data.py --src data/val2017
-
-INT8 calibration pool — 2000 images from train2017 (~315 MB):
-
-    python fetch_train_pool.py
-
-Calibration images come from train2017 and the measurement set from val2017, so
-they are different COCO splits and cannot overlap. That separation is the point:
-calibrating INT8 on the images used to score mAP tunes the dynamic ranges to the
-test set and reports a number that is too good, with nothing to flag it. Both
-scripts check for overlap anyway.
-
-`fetch_train_pool.py` downloads the images named in `train_pool_manifest.txt`
-one at a time rather than pulling `train2017.zip`, which is ~19 GB against the
-13 GB free on this machine. Calibration needs a few hundred images rather than a
-whole split, so a pool this size is plenty. The manifest is committed (34 KB) so a
-clone gets the same pool without re-deriving it from the 241 MB annotations
-archive; it is the first 2000 of all 118,287 train2017 filenames after a seeded
-shuffle. 2000 rather than 500 leaves room to retry with more images if INT8 turns
-out to cost too much mAP — which it did, and the retry is why the build calibrates on
-1000 (see below).
-
-Both selections are seeded (1337) and self-verifying — each script recomputes
-its manifest hash and exits non-zero on a mismatch, so pointing `--src` at the
-wrong directory fails immediately instead of silently benchmarking other images:
-
-| set | source split | manifest sha256 |
-|---|---|---|
-| `data/val500` | val2017 | `faabd1586d3313cc6cdac1db9b7a570c4dd0ef980e8fde83cdd31ac8a846e9f7` |
-| `data/train_pool` | train2017 | `6c787a8293f8ea2223b451a45e3c10d137716496f5b782c59b38a5428049b7e6` |
-
-val500 images are hardlinked from `data/val2017`, so they cost no extra disk.
-
-## Reproduce
-
-With the environment and data in place:
-
-    source .venv/bin/activate     # not .venv/bin/python — activate it
-    ./run_all.sh --fresh
-
-It takes roughly 20 minutes and stops at the first failure rather than carrying on with
-a broken artifact. To follow it without the TensorRT build log:
-
-    ./run_all.sh 2>&1 | tee sweep.log | grep -E "^===|^\[(PASS|FAIL|UNGATED)\]|mAP50-95 ="
-
-**`--fresh` is what keeps the table yours.** Both `benchmark.py` and `evaluate.py`
-open their output with `"a"`, and this repository ships the rows measured here, so a
-plain `./run_all.sh` appends to them and the report prints every config twice — two
-machines' numbers in one table. `--fresh` removes `results.jsonl` first
-(`git checkout results.jsonl` puts it back) and *trims* rather than deletes
-`accuracy.jsonl`, because that file holds two rows the pipeline never regenerates: the
-full-val2017 reference and ONNX Runtime on CPU. Running without it warns rather than
-silently doing the wrong thing.
-
-**Your numbers will not match the ones above, and that is expected.** A TensorRT engine
-is built for one GPU and one TensorRT version, so different hardware gives different
-latency outright. Even rebuilding on this machine moves mAP by 0.0001 to 0.0003 through
-tactic selection. What should reproduce is the shape of the result — the ordering of the
-rows, FP16 beating INT8 on both axes, the size of the gaps — not the digits.
-
 ## What the mAP numbers do and do not mean
 
 **Against the published figure.** Running `evaluate.py` over all 5000 val2017
@@ -527,6 +461,35 @@ actually reports.
 set — a 0.036 spread, which is large. mAP over 500 images is noisy, so the subset
 figure is only ever used to compare runtimes against each other on identical
 images. It is not comparable to any published number, including the one above.
+
+## How the image sets are built
+
+Calibration images come from train2017 and the measurement set from val2017, so
+they are different COCO splits and cannot overlap. That separation is the point:
+calibrating INT8 on the images used to score mAP tunes the dynamic ranges to the
+test set and reports a number that is too good, with nothing to flag it. Both
+scripts check for overlap anyway.
+
+`fetch_train_pool.py` downloads the images named in `train_pool_manifest.txt`
+one at a time rather than pulling `train2017.zip`, which is ~19 GB against the
+13 GB free on this machine. Calibration needs a few hundred images rather than a
+whole split, so a pool this size is plenty. The manifest is committed (34 KB) so a
+clone gets the same pool without re-deriving it from the 241 MB annotations
+archive; it is the first 2000 of all 118,287 train2017 filenames after a seeded
+shuffle. 2000 rather than 500 leaves room to retry with more images if INT8 turns
+out to cost too much mAP — which it did, and the retry is why the build calibrates on
+1000 (see [where the accuracy goes](#where-the-accuracy-goes)).
+
+Both selections are seeded (1337) and self-verifying — each script recomputes
+its manifest hash and exits non-zero on a mismatch, so pointing `--src` at the
+wrong directory fails immediately instead of silently benchmarking other images:
+
+| set | source split | manifest sha256 |
+|---|---|---|
+| `data/val500` | val2017 | `faabd1586d3313cc6cdac1db9b7a570c4dd0ef980e8fde83cdd31ac8a846e9f7` |
+| `data/train_pool` | train2017 | `6c787a8293f8ea2223b451a45e3c10d137716496f5b782c59b38a5428049b7e6` |
+
+val500 images are hardlinked from `data/val2017`, so they cost no extra disk.
 
 ## Limitations
 
@@ -575,6 +538,40 @@ the size of the dynamic-shape build of the same graph and slower despite it; tha
 localised to kernel size and a 6-stream fan-out, but why the builder makes that choice is
 unknown. And ONNX Runtime on CPU coming out slower than PyTorch on CPU is reported
 without investigation.
+
+## Verified environment
+Driver 595.84 / PyTorch 2.11.0+cu128 / ONNX Runtime 1.23.2 /
+TensorRT 10.16.1.11 / Python 3.10.12.
+Full detail in `env_report.json`, exact packages in `requirements.lock.txt`.
+
+ONNX Runtime's CUDA provider links libraries that pip installs under
+`site-packages/nvidia/*/lib`, where the dynamic loader does not look, so `benchmark.py`
+dlopens them before opening a session. Without that, ORT found CUDA only when torch had
+been imported first — which `verify_env.py` did, so it reported PASS while
+`evaluate.py --runtime onnx --device cuda` could not get a GPU session at all. That
+check now runs in a subprocess with no torch in it.
+
+## What's here
+
+`./run_all.sh` does the whole pipeline end to end — see [Reproduce](#reproduce) for the
+two things to do before running it a second time. The individual steps, in the order it
+runs them:
+
+| | |
+|---|---|
+| `setup.sh` | One-command setup from a clone: venv, dependencies, datasets, gate. Idempotent. |
+| `verify_env.py` | Gate before measuring anything. Checks what fails silently: ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels. Writes `env_report.json`. |
+| `prepare_data.py` | Deterministic 500-image measurement set from val2017. |
+| `fetch_train_pool.py` | Pulls the train2017 pool used for INT8 calibration. |
+| `build_engine.py` | TensorRT 10 builder, with a real INT8 calibrator and a fingerprinted calibration cache. `--fp16-prefix` pins named blocks back to FP16; `--detailed-layers` keeps per-layer info for profiling. |
+| `check_parity.py` | The gate between export and measurement. Same images through every runtime, detections compared against PyTorch. |
+| `benchmark.py` | Latency: warm-up, CUDA sync, stage-separated timing, p50/p99 over 3 runs. Appends to `results.jsonl`. |
+| `evaluate.py` | Accuracy: COCO mAP via pycocotools. Appends to `accuracy.jsonl`. |
+| `make_report.py` | Joins those two files into `report_table.md` and the figures. |
+| `common.py` | Shared preprocess and postprocess. Every runtime calls the same one — that is what makes the comparison a comparison. |
+
+`train_pool_manifest.txt` and `env_report.json` are committed so a clone can
+reproduce the same image pool and see what the numbers were measured on.
 
 ## License
 

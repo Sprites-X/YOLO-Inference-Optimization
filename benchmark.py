@@ -46,6 +46,9 @@ def _row_for_this_process(rows: dict) -> list | None:
     return rows[sorted(rows)[0]]
 
 
+_GPU_STATE_WARNED = False
+
+
 def gpu_state() -> dict:
     # Record temperature, clocks and whether the card throttled alongside every round,
     # so a round that came out slower than its neighbours can be pinned on throttling
@@ -77,7 +80,17 @@ def gpu_state() -> dict:
                 "temp_c": float(parts[1]), "sm_clock_mhz": float(parts[2]),
                 "power_w": float(parts[3]), "mem_used_mb": float(parts[4]),
                 "throttled": bool(reasons), "throttle_reasons": reasons}
-    except Exception:
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as e:
+        # Was a bare `except Exception: return {}`. Telemetry vanishing from a record is
+        # invisible in the table, and the empty dict then reads as "no GPU" rather than
+        # "we failed to ask" — so say it once. Once, not per round: gpu_state() is
+        # called several times per config and a repeated warning trains you to skip it.
+        global _GPU_STATE_WARNED
+        if not _GPU_STATE_WARNED:
+            _GPU_STATE_WARNED = True
+            print(f"  [warn] could not read GPU telemetry ({type(e).__name__}: {e}) — "
+                  f"gpu_before/gpu_after and the throttle check will be empty for "
+                  f"this run")
         return {}
 
 
@@ -154,7 +167,7 @@ def preload_ort_cuda_deps() -> list[str]:
 
 
 # ==========================================================================
-# Runners 
+# Runners
 # ==========================================================================
 # All three classes expose the same infer/sync/peak_vram_mb/model_size_mb, so
 # run_once can time them with one code path. Runtime differences belong inside the
@@ -468,7 +481,13 @@ def load_images(d: str, limit: int) -> list[np.ndarray]:
     if not files:
         raise FileNotFoundError(f"no images found in {d}")
     imgs = [cv2.imread(str(p)) for p in files]
+    unreadable = sum(1 for i in imgs if i is None)
     imgs = [i for i in imgs if i is not None]
+    # Dropping these quietly would leave the row measured on fewer images than
+    # config.num_images claims, with nothing in the record to say so.
+    if unreadable:
+        print(f"  [warn] {unreadable} of {len(files)} files could not be decoded and are "
+              f"not in this measurement")
     print(f"[data] loaded {len(imgs)} images into RAM (keeps disk I/O out of the timing)")
     return imgs
 

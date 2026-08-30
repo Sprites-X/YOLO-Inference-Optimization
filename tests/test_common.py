@@ -84,7 +84,7 @@ def test_letterbox_pads_with_the_training_grey():
 # preprocess
 # --------------------------------------------------------------------------
 def test_preprocess_contract():
-    x, r, pad = preprocess(bgr(1080, 1920))
+    x, _, _ = preprocess(bgr(1080, 1920))
     assert x.shape == (1, 3, IMG_SIZE, IMG_SIZE)
     assert x.dtype == np.float32
     assert 0.0 <= x.min() and x.max() <= 1.0

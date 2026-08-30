@@ -170,8 +170,8 @@ def match(ref, cmp):
     runtimes. Compared by index that swap reads as two large box errors; it is really
     two correct boxes in a different order.
     """
-    rb, rs, rc = ref
-    cb, cs, cc = cmp
+    rb, _, rc = ref
+    cb, _, cc = cmp
     ious = iou_matrix(rb, cb)
     # Never pair across classes: the same box under a different label is a real
     # disagreement, not a small numeric one.

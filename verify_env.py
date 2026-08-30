@@ -1,5 +1,5 @@
 from __future__ import annotations
- 
+
 import json
 import os
 import platform
@@ -8,7 +8,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
- 
+
 # Gate that runs before any measurement, writing env_report.json to go alongside the
 # README. Benchmark numbers mean nothing without knowing what they were measured on.
 #
@@ -17,10 +17,10 @@ from pathlib import Path
 REPORT = {"checked_at": datetime.now(timezone.utc).isoformat(), "checks": {}, "versions": {}}
 FAILURES: list[str] = []
 WARNINGS: list[str] = []
- 
+
 GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m"
- 
- 
+
+
 # FAIL = do not measure, the results will be wrong.
 # WARN = you can measure, but numbers may wobble or not compare across machines.
 # Two levels rather than one, because if everything is a FAIL people start skipping
@@ -28,20 +28,38 @@ GREEN, RED, YELLOW, DIM, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[2m", 
 def ok(name, detail=""):
     print(f"  {GREEN}PASS{RESET}  {name} {DIM}{detail}{RESET}")
     REPORT["checks"][name] = {"status": "pass", "detail": detail}
- 
- 
+
+
 def fail(name, detail=""):
     print(f"  {RED}FAIL{RESET}  {name} {DIM}{detail}{RESET}")
     REPORT["checks"][name] = {"status": "fail", "detail": detail}
     FAILURES.append(name)
- 
- 
+
+
 def warn(name, detail=""):
     print(f"  {YELLOW}WARN{RESET}  {name} {DIM}{detail}{RESET}")
     REPORT["checks"][name] = {"status": "warn", "detail": detail}
     WARNINGS.append(name)
- 
- 
+
+
+# env_report.json is committed, so no detail written into it may carry the home
+# directory of whoever ran it — two machines that are set up identically would
+# otherwise produce reports that differ only by a username. Paths inside the repo come
+# out relative to it, the rest with $HOME collapsed to ~. (The trtexec check strips its
+# own path for the same reason, by cutting the line trtexec echoes.)
+_REPO = Path(__file__).resolve().parent
+
+
+def short_path(p: str | Path) -> str:
+    rp = Path(p).resolve()
+    if rp.is_relative_to(_REPO):
+        return str(rp.relative_to(_REPO))
+    try:
+        return "~/" + str(rp.relative_to(Path.home()))
+    except ValueError:
+        return str(rp)
+
+
 # Swallowing every exception is deliberate: a diagnostic script that dies when a tool
 # is missing is useless. Every check has to end in a FAIL or WARN, never a traceback.
 def sh(cmd: str) -> str | None:
@@ -51,8 +69,8 @@ def sh(cmd: str) -> str | None:
         ).stdout.strip()
     except Exception:
         return None
- 
- 
+
+
 # --------------------------------------------------------------------------
 def check_nvidia_wheel_majors():
     """Every cu-suffixed nvidia wheel in this venv has to agree on the CUDA major.
@@ -107,7 +125,7 @@ def check_driver():
     REPORT["versions"]["driver"] = parts[1]
     REPORT["versions"]["vram_total"] = parts[2]
     ok("nvidia-smi", " | ".join(parts))
- 
+
     # The floor depends on the card, so ask the card rather than assuming this one.
     # 570 is the first driver with Blackwell (sm_120) support and is what this machine
     # needs; demanding it everywhere would fail a perfectly good Ampere box on 535.
@@ -128,8 +146,8 @@ def check_driver():
             ok(f"driver >= {floor}", f"{parts[1]} (floor set by {why})")
     except ValueError:
         warn("driver version", f"could not parse: {parts[1]}")
- 
- 
+
+
 def check_torch():
     print("\n[2] PyTorch + CUDA kernel")
     try:
@@ -137,18 +155,18 @@ def check_torch():
     except ImportError:
         fail("import torch", "not installed")
         return
- 
+
     REPORT["versions"]["torch"] = torch.__version__
     REPORT["versions"]["torch_cuda"] = torch.version.cuda
     ok("torch", f"{torch.__version__} (built for CUDA {torch.version.cuda})")
- 
+
     # is_available() can be True while nothing actually works — it only checks that a
     # driver and CUDA runtime exist, not that the installed wheel ships sm_120 kernels.
     # Hence the real matmul below, watching for "no kernel image" as the tell.
     if not torch.cuda.is_available():
         fail("torch.cuda.is_available()", "False")
         return
- 
+
     cap = torch.cuda.get_device_capability()
     REPORT["versions"]["compute_capability"] = f"{cap[0]}.{cap[1]}"
     if cap == (12, 0):
@@ -180,8 +198,8 @@ def check_torch():
         ok("FP16 matmul", "works")
     except RuntimeError as e:
         warn("FP16 matmul", str(e).split("\n")[0])
- 
- 
+
+
 # The newest torch ships with cu130 while the onnxruntime-gpu release is still CUDA
 # 12.x, so the whole stack was held back to cu128. This check is what catches someone
 # cloning the repo and installing a newer torch over the top — ORT would quietly fall
@@ -193,17 +211,17 @@ def check_onnxruntime():
     except ImportError:
         fail("import onnxruntime", "onnxruntime-gpu not installed")
         return
- 
+
     REPORT["versions"]["onnxruntime"] = ort.__version__
     avail = ort.get_available_providers()
     ok("onnxruntime", f"{ort.__version__} | providers: {avail}")
- 
+
     # get_available_providers() only says what this wheel was built with, not which
     # provider a real session would pick — hence the actual model test below.
     if "CUDAExecutionProvider" not in avail:
         fail("CUDAExecutionProvider in build", "this wheel is CPU-only — install onnxruntime-gpu")
         return
- 
+
     # Run the session test in a subprocess that never imports torch.
     #
     # It used to run here, and passed — but only because check_torch() runs first and
@@ -225,7 +243,7 @@ def check_onnxruntime():
     except Exception as e:
         fail("ORT smoke test", str(e).split("\n")[0])
         return
- 
+
     if line.startswith("CUDA-OK"):
         ok("ORT really on CUDA", line[len("CUDA-OK "):] + " (no torch in that process)")
     elif line.startswith("CUDA-NO"):
@@ -233,8 +251,8 @@ def check_onnxruntime():
              f"fell back to {line[len('CUDA-NO '):]} — the 'ONNX Runtime GPU' row would be CPU numbers")
     else:
         fail("ORT smoke test", (r.stderr.strip().splitlines() or ["no output"])[-1][:200])
- 
- 
+
+
 # Kept as source text rather than a function because it has to run in a process where
 # torch was never imported; anything importing this module would drag torch in through
 # the runners.
@@ -277,8 +295,8 @@ if "CUDAExecutionProvider" in used:
 else:
     print("CUDA-NO", used)
 """
- 
- 
+
+
 def check_tensorrt():
     print("\n[4] TensorRT")
     try:
@@ -286,7 +304,7 @@ def check_tensorrt():
     except ImportError:
         fail("import tensorrt", "not installed")
         return
- 
+
     REPORT["versions"]["tensorrt"] = trt.__version__
     # 10.8 is the first TRT with Blackwell kernels. Below that a build still succeeds
     # but falls back to PTX JIT, which is slower and can give different results.
@@ -297,31 +315,35 @@ def check_tensorrt():
         ok("tensorrt >= 10.8", trt.__version__)
     else:
         fail("tensorrt >= 10.8", f"found {trt.__version__} — Blackwell needs 10.8 or newer")
- 
+
     if parts[0] >= 10:
         ok("TensorRT 10 API", "uses execute_async_v3 + set_tensor_address (not execute_v2)")
- 
+
     try:
         logger = trt.Logger(trt.Logger.ERROR)
         trt.Builder(logger)
         ok("create trt.Builder", "ok")
     except Exception as e:
         fail("create trt.Builder", str(e).split("\n")[0])
- 
+
     try:
         try:
             # cuda.cudart is deprecated and moved to cuda.bindings.runtime.
             # build_engine.py and benchmark.py carry the same fallback.
-            from cuda.bindings import runtime as cudart  
+            from cuda.bindings import runtime as cudart
             api = "cuda.bindings.runtime"
         except ImportError:
-            from cuda import cudart  
+            from cuda import cudart
             api = "cuda.cudart (legacy)"
         try:
             from importlib.metadata import version
             ver = version("cuda-python")
         except Exception:
             ver = "unknown"
+        # Touch the module rather than importing it and walking away: the import
+        # alone proves the package resolves, not that it exposes the enum every
+        # cudaMemcpy check in benchmark.py and build_engine.py compares against.
+        _ = cudart.cudaError_t.cudaSuccess
         REPORT["versions"]["cuda_python"] = ver
         # requirements.txt pins cuda-python<13, because torch cu128 pins
         # cuda-bindings<13 and pip left to itself installs 13.x, which clashes. Checked
@@ -335,7 +357,7 @@ def check_tensorrt():
             ok("cuda-python", f"{ver} via {api}")
     except ImportError:
         fail("cuda-python", "pip install cuda-python — these scripts use cudart, not pycuda")
- 
+
     # WARN rather than FAIL because trtexec does not ship with the pip wheel, only in
     # the GA tarball. (The GitHub source repo has no bin/ folder, so downloading the
     # wrong file leaves you without trtexec.) It is only used as a cross-check;
@@ -359,8 +381,8 @@ def check_tensorrt():
     else:
         warn("trtexec on PATH",
              "not found — usually in /usr/src/tensorrt/bin or site-packages/tensorrt_libs")
- 
- 
+
+
 def check_misc():
     print("\n[5] Other libraries + machine state")
     for mod in ("ultralytics", "cv2", "numpy", "pycocotools"):
@@ -369,7 +391,7 @@ def check_misc():
             v = getattr(m, "__version__", None)
             # Some cv2 builds have no __version__, and the dist name does not match
             # the module name, so ask importlib.metadata by package name instead.
-            if v is None:                      
+            if v is None:
                 from importlib.metadata import version as _v
                 dist = {"cv2": "opencv-python"}.get(mod, mod)
                 try:
@@ -382,7 +404,7 @@ def check_misc():
             # pycocotools is only a WARN because it is used solely by evaluate.py;
             # benchmark.py, which is the main job, runs without it.
             (warn if mod == "pycocotools" else fail)(mod, "not installed")
- 
+
     # Activating the venv is not the same as the venv's `yolo` winning. Activation puts
     # .venv/bin on PATH, but does not guarantee it comes first: here ~/.local/bin sits
     # ahead of it, so bare `yolo` was ultralytics 8.4.104 while every import in this venv
@@ -400,10 +422,10 @@ def check_misc():
     venv_root = Path(sys.prefix).resolve()
     pip_cli = shutil.which("pip")
     if pip_cli and not Path(pip_cli).resolve().is_relative_to(venv_root):
-        warn("pip on PATH", f"{pip_cli} is outside this venv — use `python -m pip` so "
-                            f"installs land here and not in ~/.local")
+        warn("pip on PATH", f"{short_path(pip_cli)} is outside this venv — use "
+                            f"`python -m pip` so installs land here and not in ~/.local")
     elif pip_cli:
-        ok("pip on PATH", pip_cli)
+        ok("pip on PATH", short_path(pip_cli))
 
     cli = shutil.which("yolo")
     if cli is None:
@@ -412,11 +434,11 @@ def check_misc():
     elif not Path(cli).resolve().is_relative_to(venv_root):
         # tail -1 because a mismatched install often prints an import traceback first.
         cli_ver = sh(f"'{cli}' version 2>&1 | tail -1") or "unreadable"
-        warn("yolo CLI", f"{cli} is outside this venv (says {cli_ver!r}, venv has "
+        warn("yolo CLI", f"{short_path(cli)} is outside this venv (says {cli_ver!r}, venv has "
                          f"{REPORT['versions'].get('ultralytics')!r}) — running "
                          f"`yolo export` by hand would use that one")
     else:
-        ok("yolo CLI", cli)
+        ok("yolo CLI", short_path(cli))
 
     # A powersave governor makes the CPU baseline row slower than the hardware really
     # is, which flatters the GPU speedup. The setting only lasts until reboot, so it
@@ -430,20 +452,20 @@ def check_misc():
                              f"(sudo cpupower frequency-set -g performance)")
     else:
         warn("CPU governor", "could not read it")
- 
+
     pstate = sh("nvidia-smi --query-gpu=pstate,clocks.sm --format=csv,noheader")
     if pstate:
         ok("GPU state now", pstate)
- 
+
     REPORT["versions"]["os"] = platform.platform()
     REPORT["versions"]["python"] = sys.version.split()[0]
     REPORT["versions"]["cpu"] = (sh("lscpu | grep 'Model name' | cut -d: -f2") or "").strip()
     ok("system", f"{REPORT['versions']['cpu']} | py{REPORT['versions']['python']}")
- 
- 
+
+
 def main():
     print(f"\n{'='*68}\n  Environment Verification\n{'='*68}")
- 
+
     # Two venv mistakes already made: installing into ~/.local without noticing, and
     # running the verify script from a terminal that was never activated. Versions then
     # appear to go backwards (ultralytics 8.4.126 -> 8.4.104, cv2 5.0.0 -> 4.13.0,
@@ -454,7 +476,7 @@ def main():
         print(f"  {DIM}python is currently {sys.executable}{RESET}\n")
         return 1
     print(f"  {DIM}venv: {sys.prefix}{RESET}")
- 
+
     # ROS 2's setup.bash sets PYTHONPATH, which a venv does not strip, so pip freeze
     # pulls roughly 150 ROS packages into the lock file. Being "in a venv" does not
     # mean actually isolated.
@@ -472,18 +494,18 @@ def main():
               f"requirements.lock.txt` to keep the lock file clean{RESET}")
     else:
         ok("PYTHONPATH", "clean — nothing shadowing the venv")
- 
+
     check_driver()
     check_torch()
     check_onnxruntime()
     check_tensorrt()
     check_misc()
- 
+
     check_nvidia_wheel_majors()
 
     with open("env_report.json", "w") as f:
         json.dump(REPORT, f, indent=2, ensure_ascii=False)
- 
+
     print(f"\n{'='*68}")
     if FAILURES:
         print(f"{RED}  {len(FAILURES)} FAIL{RESET} — fix these before measuring anything")
@@ -495,7 +517,7 @@ def main():
         print(f"{YELLOW}  {len(WARNINGS)} WARN{RESET} — measurable, but numbers may wobble")
     print(f"  written to env_report.json (attach it in the README)\n{'='*68}\n")
     return 1 if FAILURES else 0
- 
- 
+
+
 if __name__ == "__main__":
     sys.exit(main())

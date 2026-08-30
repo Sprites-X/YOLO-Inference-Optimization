@@ -138,7 +138,7 @@ def postprocess(
     meta,
     conf_thres: float = DEPLOY_CONF,
     iou_thres: float = DEPLOY_IOU,
-    max_det: int = 300,
+    max_det: int = VAL_MAX_DET,
 ):
     # Every runtime emits a different layout (torch head / ONNX export / TRT
     # engine), so work it out from the shape instead of hardcoding: the short
@@ -149,7 +149,7 @@ def postprocess(
     # Not this project, but come back here if you ever use an imgsz that small.
     if raw.ndim == 3:
         raw = raw[0]
-    if raw.shape[0] < raw.shape[1]:     
+    if raw.shape[0] < raw.shape[1]:
         raw = raw.T
 
     boxes_xywh = raw[:, :4]

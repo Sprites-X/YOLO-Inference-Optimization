@@ -34,6 +34,11 @@ def main():
     ap.add_argument("--results", default="results.jsonl")
     ap.add_argument("--accuracy", default="accuracy.jsonl")
     ap.add_argument("--outdir", default=".")
+    # accuracy.jsonl also carries reference measurements taken on other image sets —
+    # the full-val2017 PyTorch row is one. Those share a key with the val500 rows, so
+    # they have to be filtered out rather than left to the join.
+    ap.add_argument("--eval-images", type=int, default=500,
+                    help="only join accuracy rows measured on this many images")
     args = ap.parse_args()
 
     results = load_jsonl(args.results)
@@ -42,9 +47,25 @@ def main():
         raise SystemExit(f"no data in {args.results} — run benchmark.py first")
 
     # NOTE: both files are append-only. Re-running the same config gives a duplicate
-    # row in the table, and acc_map silently keeps the last one (the dict comprehension
-    # overwrites). Delete the files before starting a fresh sweep.
-    acc_map = {key_of(a): a for a in accs}
+    # row in the table, and acc_map keeps the last one. Delete the files before starting
+    # a fresh sweep.
+    #
+    # The mAP column used to read 0.3651 for PyTorch FP32 GPU — the full-val2017 number,
+    # joined onto a latency row timed on val500, where that same config scores 0.4008.
+    # Nothing in the table said the two came from different image sets. Rows measured on
+    # anything other than --eval-images are dropped before the join for that reason.
+    graded = [a for a in accs if a.get("num_images") == args.eval_images]
+    acc_map = {}
+    for a in graded:
+        prev = acc_map.get(key_of(a))
+        # A re-run is a fine reason for a duplicate and the newer row wins, but it is
+        # said out loud: a duplicate that is not a re-run means two different configs
+        # are sharing a key, and then the mAP column is reporting the wrong model.
+        if prev:
+            print(f"[warn] two accuracy rows for {key_of(a)}: "
+                  f"{prev['model']} {prev['mAP50_95']:.4f} then {a['model']} "
+                  f"{a['mAP50_95']:.4f} — using the later one")
+        acc_map[key_of(a)] = a
     outdir = Path(args.outdir)
 
     # ---------------- table ----------------

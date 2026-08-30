@@ -388,7 +388,13 @@ class TensorRTRunner:
         # (_fp16.engine / _int8.engine). Check int8 before fp16, since an INT8 engine
         # has the FP16 flag set too.
         p = Path(path).name.lower()
-        for tag, label in (("int8", "INT8"), ("fp16", "FP16"),
+        # int8_fp16head has to be tested before int8, and needs a label of its own.
+        # Pinning the head back to FP16 is a different config from plain INT8, and the
+        # point of building it is to put the two side by side — but make_report.key_of()
+        # joins the two jsonl files on precision, so one shared label makes the mAP of
+        # whichever was measured last stand in for both.
+        for tag, label in (("int8_fp16head", "INT8+FP16head"),
+                           ("int8", "INT8"), ("fp16", "FP16"),
                            ("half", "FP16"), ("fp32", "FP32")):
             if tag in p:
                 return label

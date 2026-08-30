@@ -98,7 +98,10 @@ for B in 1 4 8; do
 done
 
 echo "=== accuracy ==="
-python evaluate.py --images $IMAGES --ann $ANN --runtime pytorch  --model $MODEL
+# --per-class on the baseline too, not just the INT8 rows: a per-class column for a
+# quantized engine says nothing on its own, it only means something against the
+# FP32 numbers for the same classes.
+python evaluate.py --images $IMAGES --ann $ANN --runtime pytorch  --model $MODEL --per-class
 python evaluate.py --images $IMAGES --ann $ANN --runtime onnx     --model yolov8n.onnx
 python evaluate.py --images $IMAGES --ann $ANN --runtime tensorrt --model yolov8n_fp16.engine
 python evaluate.py --images $IMAGES --ann $ANN --runtime tensorrt --model yolov8n_int8.engine --per-class

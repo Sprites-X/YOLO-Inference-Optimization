@@ -380,8 +380,21 @@ def check_misc():
     # been exported by one version while everything measuring it used another, silently.
     # run_all.sh now calls the entrypoint through python and does not depend on PATH;
     # this is a WARN for the README's step-by-step commands, which do run `yolo`.
-    cli = shutil.which("yolo")
+    # Same shape as the yolo check below, and the one that costs more when it is wrong.
+    # `pip` on PATH is not necessarily this interpreter's pip: with ~/.local/bin ahead of
+    # .venv/bin, bare `pip` installs into ~/.local, which a venv does not read
+    # (ENABLE_USER_SITE is false inside one). Everything appears to install and then
+    # every import here fails, which reads as a broken install rather than a misdirected
+    # one. `python -m pip` cannot miss, and is what the README tells you to use.
     venv_root = Path(sys.prefix).resolve()
+    pip_cli = shutil.which("pip")
+    if pip_cli and not Path(pip_cli).resolve().is_relative_to(venv_root):
+        warn("pip on PATH", f"{pip_cli} is outside this venv — use `python -m pip` so "
+                            f"installs land here and not in ~/.local")
+    elif pip_cli:
+        ok("pip on PATH", pip_cli)
+
+    cli = shutil.which("yolo")
     if cli is None:
         warn("yolo CLI", "not on PATH — run_all.sh does not need it, the README's "
                          "individual export commands do")

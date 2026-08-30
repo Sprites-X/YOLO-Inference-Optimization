@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-30T06:49:37.440258+00:00",
+  "checked_at": "2026-08-30T08:48:21.344638+00:00",
   "checks": {
     "PYTHONPATH": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul succeeded (checksum 2924.9)"
+      "detail": "matmul succeeded (checksum 9095.4)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -72,6 +72,14 @@
     "pycocotools": {
       "status": "pass",
       "detail": "2.0.11"
+    },
+    "pip on PATH": {
+      "status": "warn",
+      "detail": "/home/sprites/.local/bin/pip is outside this venv — use `python -m pip` so installs land here and not in ~/.local"
+    },
+    "yolo CLI": {
+      "status": "warn",
+      "detail": "/home/sprites/.local/bin/yolo is outside this venv (says '8.4.104', venv has '8.4.126') — running `yolo export` by hand would use that one"
     },
     "CPU governor": {
       "status": "pass",

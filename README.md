@@ -376,15 +376,27 @@ reproduce the same image pool and see what the numbers were measured on.
 
 ## Install
 
-`requirements.lock.txt` pins versions but not the non-PyPI indexes.
-Install torch and TensorRT first:
+`requirements.lock.txt` pins versions but not the non-PyPI indexes. `torch` and
+`torchvision` are pinned to `+cu128` builds, which exist only on the PyTorch index —
+plain PyPI returns 404 for them — so they go first:
 
-    pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 \
+    python -m pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 \
         --index-url https://download.pytorch.org/whl/cu128
-    pip install --extra-index-url https://pypi.nvidia.com \
+    python -m pip install --extra-index-url https://pypi.nvidia.com \
         tensorrt-cu12==10.16.1.11 tensorrt-cu12-libs==10.16.1.11 \
         tensorrt-cu12-bindings==10.16.1.11
-    pip install -r requirements.lock.txt
+    python -m pip install -r requirements.lock.txt
+
+Once those two are installed, the lock file resolves without needing either index
+again: pip treats an already-satisfied pin as satisfied and never looks it up.
+
+**`python -m pip`, not bare `pip`.** Activating a venv puts `.venv/bin` on PATH but does
+not guarantee it wins — if `~/.local/bin` sits ahead of it, bare `pip` is the *user*
+pip and installs into `~/.local`, which a venv does not read (`ENABLE_USER_SITE` is
+false inside one). The install appears to succeed and then `verify_env.py` reports the
+packages missing. `python -m pip` always targets the interpreter you are running, so it
+cannot land somewhere else. Same failure as bare `yolo` picking up a different
+ultralytics; `verify_env.py` checks for both.
 
 Then run `python verify_env.py` — it must report zero failures. A WARN is survivable;
 `trtexec` is the usual one, and it only matters for the independent cross-check behind

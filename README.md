@@ -361,6 +361,7 @@ runs them:
 
 | | |
 |---|---|
+| `setup.sh` | One-command setup from a clone: venv, dependencies, datasets, gate. Idempotent. |
 | `verify_env.py` | Gate before measuring anything. Checks what fails silently: ONNX Runtime falling back to CPU, PyTorch without sm_120 kernels. Writes `env_report.json`. |
 | `prepare_data.py` | Deterministic 500-image measurement set from val2017. |
 | `fetch_train_pool.py` | Pulls the train2017 pool used for INT8 calibration. |
@@ -374,7 +375,29 @@ runs them:
 `train_pool_manifest.txt` and `env_report.json` are committed so a clone can
 reproduce the same image pool and see what the numbers were measured on.
 
-## Install
+## Setup
+
+    git clone git@github.com:Sprites-X/YOLO-Inference-Optimization.git
+    cd YOLO-Inference-Optimization/yolo-bench
+    ./setup.sh
+
+That is the whole thing: virtual environment, dependencies, both COCO subsets, and the
+environment check. It is safe to re-run — every step skips itself if already done — and
+it stops at the first failure rather than half-configuring. Budget ~1.4 GB of downloads.
+Use `PYTHON=/path/to/python3.11 ./setup.sh` if `python3` is not the interpreter you want.
+
+**Prerequisites it cannot install for you:** an NVIDIA GPU, a driver new enough for it
+(570+ on Blackwell, 525+ otherwise — `verify_env.py` checks against your actual card),
+and Python 3.10 or newer. `trtexec` is optional; it ships in the TensorRT GA tarball
+rather than the pip wheel, and only the independent cross-check in the INT8 section
+uses it.
+
+Then measure:
+
+    source .venv/bin/activate
+    ./run_all.sh --fresh
+
+### Doing it by hand
 
 `requirements.lock.txt` pins versions but not the non-PyPI indexes. `torch` and
 `torchvision` are pinned to `+cu128` builds, which exist only on the PyTorch index —
@@ -452,25 +475,21 @@ val500 images are hardlinked from `data/val2017`, so they cost no extra disk.
 With the environment and data in place:
 
     source .venv/bin/activate     # not .venv/bin/python — activate it
-    rm results.jsonl              # see below
-    ./run_all.sh
+    ./run_all.sh --fresh
 
 It takes roughly 20 minutes and stops at the first failure rather than carrying on with
 a broken artifact. To follow it without the TensorRT build log:
 
     ./run_all.sh 2>&1 | tee sweep.log | grep -E "^===|^\[(PASS|FAIL|UNGATED)\]|mAP50-95 ="
 
-**Delete `results.jsonl` first** (`git checkout results.jsonl` puts it back if you
-change your mind). It is committed with the rows measured here, and
-`benchmark.py` appends rather than overwrites, so a second sweep stacks on top of the
-first and `make_report.py` prints every config twice. Deleting it is the fix.
-
-**Do not delete `accuracy.jsonl` the same way.** It holds two rows `run_all.sh` never
-regenerates — the full-val2017 reference (n=5000) and ONNX Runtime on CPU — so removing
-the file loses measurements the pipeline cannot reproduce. Re-running appends duplicates
-of the five rows it does own; `make_report.py` warns and keeps the later one, which is
-the right answer for a re-run. To reset it properly, drop only the rows with
-`num_images == 500` other than the ONNX CPU one.
+**`--fresh` is what keeps the table yours.** Both `benchmark.py` and `evaluate.py`
+open their output with `"a"`, and this repository ships the rows measured here, so a
+plain `./run_all.sh` appends to them and the report prints every config twice — two
+machines' numbers in one table. `--fresh` removes `results.jsonl` first
+(`git checkout results.jsonl` puts it back) and *trims* rather than deletes
+`accuracy.jsonl`, because that file holds two rows the pipeline never regenerates: the
+full-val2017 reference and ONNX Runtime on CPU. Running without it warns rather than
+silently doing the wrong thing.
 
 **Your numbers will not match the ones above, and that is expected.** A TensorRT engine
 is built for one GPU and one TensorRT version, so different hardware gives different

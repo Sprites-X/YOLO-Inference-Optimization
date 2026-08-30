@@ -1,5 +1,5 @@
 {
-  "checked_at": "2026-08-30T08:48:21.344638+00:00",
+  "checked_at": "2026-08-30T09:29:20.309129+00:00",
   "checks": {
     "PYTHONPATH": {
       "status": "pass",
@@ -11,7 +11,7 @@
     },
     "driver >= 570": {
       "status": "pass",
-      "detail": "595.84"
+      "detail": "595.84 (floor set by Blackwell (sm_120))"
     },
     "torch": {
       "status": "pass",
@@ -23,7 +23,7 @@
     },
     "real CUDA kernel": {
       "status": "pass",
-      "detail": "matmul succeeded (checksum 9095.4)"
+      "detail": "matmul succeeded (checksum 1280.3)"
     },
     "FP16 matmul": {
       "status": "pass",
@@ -87,7 +87,7 @@
     },
     "GPU state now": {
       "status": "pass",
-      "detail": "P1, 2542 MHz"
+      "detail": "P1, 2550 MHz"
     },
     "system": {
       "status": "pass",

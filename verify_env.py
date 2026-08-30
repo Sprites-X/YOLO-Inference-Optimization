@@ -108,13 +108,24 @@ def check_driver():
     REPORT["versions"]["vram_total"] = parts[2]
     ok("nvidia-smi", " | ".join(parts))
  
+    # The floor depends on the card, so ask the card rather than assuming this one.
+    # 570 is the first driver with Blackwell (sm_120) support and is what this machine
+    # needs; demanding it everywhere would fail a perfectly good Ampere box on 535.
+    # 525 is the CUDA 12.x minimum, which is what the cu128 wheels need below Blackwell.
+    cap = sh("nvidia-smi --query-gpu=compute_cap --format=csv,noheader")
+    cap_major = 0
     try:
-        # 570 is the first driver with Blackwell (sm_120) support; this machine has 595.84.
+        cap_major = int(float((cap or "0").splitlines()[0]))
+    except (ValueError, IndexError):
+        pass
+    floor = 570 if cap_major >= 12 else 525
+    why = "Blackwell (sm_120)" if cap_major >= 12 else f"CUDA 12.x on sm_{cap_major}x"
+    try:
         major = int(parts[1].split(".")[0])
-        if major < 570:
-            fail("driver >= 570", f"found {parts[1]} — Blackwell needs 570 or newer")
+        if major < floor:
+            fail(f"driver >= {floor}", f"found {parts[1]} — {why} needs {floor} or newer")
         else:
-            ok("driver >= 570", parts[1])
+            ok(f"driver >= {floor}", f"{parts[1]} (floor set by {why})")
     except ValueError:
         warn("driver version", f"could not parse: {parts[1]}")
  

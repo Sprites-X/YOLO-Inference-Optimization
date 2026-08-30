@@ -2,6 +2,16 @@
 # Needs bash, not sh: `set -o pipefail` is not in POSIX sh.
 set -euo pipefail
 
+# --fresh clears the measurements this repo ships before re-measuring. Without it a
+# second sweep appends to them (benchmark.py and evaluate.py both open with "a") and the
+# report prints every config twice, mixing two machines' numbers in one table.
+#
+# accuracy.jsonl is trimmed rather than deleted: it holds two rows this script never
+# regenerates — the full-val2017 reference and ONNX Runtime on CPU — and deleting the
+# file loses measurements the pipeline cannot reproduce.
+FRESH=0
+[ "${1:-}" = "--fresh" ] && FRESH=1
+
 IMAGES=data/val500
 # Point straight at the pool rather than copying a sample into data/calib first.
 # ImageCalibrator already does random.Random(0).shuffle(files)[:--calib-num], so
@@ -24,6 +34,29 @@ from ultralytics.cfg import entrypoint
 sys.argv = ["yolo", *sys.argv[1:]]
 sys.exit(entrypoint())' "$@"
 }
+
+if [ "$FRESH" = 1 ]; then
+    echo "=== clearing previous measurements ==="
+    rm -f results.jsonl
+    if [ -f accuracy.jsonl ]; then
+        python - <<'PYEOF'
+import json
+keep = []
+for line in open("accuracy.jsonl"):
+    r = json.loads(line)
+    regenerated = r["num_images"] == 500 and not (
+        r["runtime"] == "ONNX Runtime" and r["device"] == "CPU")
+    if not regenerated:
+        keep.append(line)
+open("accuracy.jsonl", "w").writelines(keep)
+print(f"  accuracy.jsonl trimmed to {len(keep)} rows this run does not regenerate")
+PYEOF
+    fi
+    echo "  results.jsonl removed (git checkout results.jsonl restores it)"
+elif [ -s results.jsonl ]; then
+    echo "[warn] results.jsonl already has $(wc -l < results.jsonl) rows and this run"
+    echo "       appends to them. Re-run with --fresh for a clean table."
+fi
 
 echo "=== environment ==="
 python verify_env.py || { echo "fix the failures before going further"; exit 1; }

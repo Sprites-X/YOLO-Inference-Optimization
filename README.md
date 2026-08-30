@@ -355,8 +355,9 @@ check now runs in a subprocess with no torch in it.
 
 ## What's here
 
-Run `./run_all.sh` to do the whole pipeline end to end. The individual steps, in
-the order it runs them:
+`./run_all.sh` does the whole pipeline end to end — see [Reproduce](#reproduce) for the
+two things to do before running it a second time. The individual steps, in the order it
+runs them:
 
 | | |
 |---|---|
@@ -385,7 +386,13 @@ Install torch and TensorRT first:
         tensorrt-cu12-bindings==10.16.1.11
     pip install -r requirements.lock.txt
 
-Then run `python verify_env.py` — it must report zero failures.
+Then run `python verify_env.py` — it must report zero failures. A WARN is survivable;
+`trtexec` is the usual one, and it only matters for the independent cross-check behind
+the INT8 section, not for the pipeline.
+
+The model weights are not in the repository and are not a step here: ultralytics fetches
+`yolov8n.pt` itself the first time `run_all.sh` exports it. Nothing to do, but it does
+mean the first run reaches out to the network.
 
 ## Data
 
@@ -427,6 +434,37 @@ wrong directory fails immediately instead of silently benchmarking other images:
 | `data/train_pool` | train2017 | `6c787a8293f8ea2223b451a45e3c10d137716496f5b782c59b38a5428049b7e6` |
 
 val500 images are hardlinked from `data/val2017`, so they cost no extra disk.
+
+## Reproduce
+
+With the environment and data in place:
+
+    source .venv/bin/activate     # not .venv/bin/python — activate it
+    rm results.jsonl              # see below
+    ./run_all.sh
+
+It takes roughly 20 minutes and stops at the first failure rather than carrying on with
+a broken artifact. To follow it without the TensorRT build log:
+
+    ./run_all.sh 2>&1 | tee sweep.log | grep -E "^===|^\[(PASS|FAIL|UNGATED)\]|mAP50-95 ="
+
+**Delete `results.jsonl` first** (`git checkout results.jsonl` puts it back if you
+change your mind). It is committed with the rows measured here, and
+`benchmark.py` appends rather than overwrites, so a second sweep stacks on top of the
+first and `make_report.py` prints every config twice. Deleting it is the fix.
+
+**Do not delete `accuracy.jsonl` the same way.** It holds two rows `run_all.sh` never
+regenerates — the full-val2017 reference (n=5000) and ONNX Runtime on CPU — so removing
+the file loses measurements the pipeline cannot reproduce. Re-running appends duplicates
+of the five rows it does own; `make_report.py` warns and keeps the later one, which is
+the right answer for a re-run. To reset it properly, drop only the rows with
+`num_images == 500` other than the ONNX CPU one.
+
+**Your numbers will not match the ones above, and that is expected.** A TensorRT engine
+is built for one GPU and one TensorRT version, so different hardware gives different
+latency outright. Even rebuilding on this machine moves mAP by 0.0001 to 0.0003 through
+tactic selection. What should reproduce is the shape of the result — the ordering of the
+rows, FP16 beating INT8 on both axes, the size of the gaps — not the digits.
 
 ## What the mAP numbers do and do not mean
 

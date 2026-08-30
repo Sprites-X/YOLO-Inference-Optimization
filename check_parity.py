@@ -57,9 +57,9 @@ BOX_ABS_FLOOR_PX = 2.0
 # Precision noise and the odd NMS swap move a handful of boxes; a broken export moves
 # all of them, so the mean separates the two.
 # Measured over the full 500: ONNX 0.014%, TensorRT FP16 0.256%. 0.5% is only ~2x the
-# FP16 figure, which is deliberate — it is tight enough to be worth something. INT8
-# will drift further and may need this raised; set it from a measurement then, not
-# from a guess now.
+# FP16 figure, which is deliberate — it is tight enough to be worth something. It is a
+# gate for FP32 and FP16 exports only; INT8 gets no threshold at all, for the measured
+# reason under INT8_IS_NOT_GATEABLE.
 #
 # That this gate earns its place was checked rather than assumed, by perturbing a
 # working engine's output and watching which gate fires:
@@ -77,6 +77,31 @@ BOX_ABS_FLOOR_PX = 2.0
 # whole reason there are two gates rather than one.
 MEAN_BOX_REL_TOL = 0.005
 SCORE_TOL = 0.02
+
+# Why INT8 is reported but never gated here.
+#
+# The plan was to keep these gates for INT8 and raise the numbers to whatever INT8
+# actually measures. Running the same perturbation test says that cannot work. A clean
+# INT8 engine against the FP32 reference over the full 500:
+#
+#   perturbation      mean drift   pairs failing per-box   unmatched
+#   none                  6.046%                     854         689
+#   x shifted 1 px        6.216%                     932         689
+#   x shifted 3 px        7.189%                    1258         709
+#   width x1.02           5.931%                     809         689
+#   width x1.10           6.536%                    1102         693
+#
+# Compare the FP16 table above, where a 1 px shift moves the mean 5.6x and a 2% widening
+# 3.6x. Here a 1 px shift moves it by 1.03x, and **a 2% widening comes out lower than the
+# clean engine** — the quantization noise is larger than the error, and on these boxes it
+# happens to cancel some of it. No threshold separates the clean row from the bent ones,
+# so any INT8 gate would either fail a good engine or pass a broken one. The unmatched
+# column is worse: 689 for the clean engine and 689 for two of the perturbations, to the
+# detection.
+#
+# The gate that does work on INT8 is mAP, which run_all.sh runs on it. A 3 px shift is
+# invisible here and obvious there.
+INT8_IS_NOT_GATEABLE = True
 
 # A detection scoring within this of the conf threshold may legitimately appear on one
 # runtime and not the other: FP16 moves scores by ~0.007, so a box at 0.2510 survives
@@ -326,17 +351,23 @@ def main():
     print(f"[parity] reference found {sum(len(d[0]) for d in ref_dets)} detections "
           f"over {len(imgs)} images\n")
 
-    failures = []
+    failures, ungated_labels = [], []
     for spec in cmp_specs:
         runner, label = build_runner(spec)
         worst, near_thresh, nms_pick, real_unmatched, low_iou, shape_fail = compare(
             runner, label, imgs, ref_raw, ref_dets, files, args.conf, args.iou,
             args.min_iou)
 
+        # Read off the engine rather than the filename, so an engine named by hand still
+        # lands in the right branch. INT8+FP16head starts with INT8 and belongs here too.
+        # shape_fail is excluded deliberately: an output shape that does not match the
+        # reference is a broken engine, never quantization, so INT8 still fails on it.
+        ungated = (INT8_IS_NOT_GATEABLE and not shape_fail
+                   and str(getattr(runner, "precision", "")).startswith("INT8"))
         ok = (not shape_fail and not real_unmatched and not low_iou
               and worst["mean_frac"] <= MEAN_BOX_REL_TOL
               and worst["score"] <= SCORE_TOL)
-        print(f"[{'PASS' if ok else 'FAIL'}] {label}")
+        print(f"[{'UNGATED' if ungated else 'PASS' if ok else 'FAIL'}] {label}")
         if shape_fail:
             print(f"        {shape_fail}")
         else:
@@ -352,12 +383,20 @@ def main():
             print(f"        on the threshold {len(near_thresh)} (allowed)")
             print(f"        NMS pick differs {len(nms_pick)} (allowed)")
             print(f"        disagreements    {len(real_unmatched)}")
-        for e in near_thresh + nms_pick:
-            print(f"          ~ {e}")
-        for e in real_unmatched + low_iou:
-            print(f"          ! {e}")
+        if ungated:
+            ungated_labels.append(label)
+            # The per-detection dump is ~1500 lines of expected quantization noise here,
+            # and printing it invites reading a working engine as a broken one.
+            print("        not gated — quantization moves boxes further than a broken "
+                  "export would;\n"
+                  "        see INT8_IS_NOT_GATEABLE. Judge this engine by mAP instead.")
+        else:
+            for e in near_thresh + nms_pick:
+                print(f"          ~ {e}")
+            for e in real_unmatched + low_iou:
+                print(f"          ! {e}")
 
-        if not ok:
+        if not ok and not ungated:
             failures.append(f"{label}: " + (shape_fail or
                             f"{len(real_unmatched)} disagreements, {len(low_iou)} boxes "
                             f"below IoU {args.min_iou}, mean drift "
@@ -375,7 +414,14 @@ def main():
             print(f"  - {f}")
         print("\nMeasuring now would compare different models, not different runtimes.")
         sys.exit(1)
-    print("parity ok — every runtime returns the same detections, safe to measure")
+    # Worded off what was actually gated. Saying "every runtime returns the same
+    # detections" with an INT8 engine in the list would be false — it does not, it is
+    # simply not something these gates can judge.
+    if ungated_labels:
+        print(f"parity ok for the gated runtimes, safe to measure — "
+              f"{', '.join(ungated_labels)} reported but not gated, judge by mAP")
+    else:
+        print("parity ok — every runtime returns the same detections, safe to measure")
 
 
 if __name__ == "__main__":

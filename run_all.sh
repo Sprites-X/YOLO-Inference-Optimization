@@ -40,8 +40,9 @@ python build_engine.py --onnx yolov8n.onnx --precision int8 --fp16-head \
 
 # Gate: do the exports still detect what the PyTorch model detects? A wrong export
 # produces perfectly reasonable-looking latency numbers, so this has to run before any
-# measurement, not after. INT8 is left out on purpose — quantization is meant to move
-# boxes, so it is judged on mAP below rather than against FP32 geometry.
+# measurement, not after. The INT8 engines are in the list but come back UNGATED — their
+# drift gets printed for the log, and a wrong output shape still fails, but the geometric
+# thresholds do not apply to them (see INT8_IS_NOT_GATEABLE). mAP below is their gate.
 #
 # Over all 500, not a sample: at 100 the run passed while missing every case where the
 # two runtimes keep a different NMS survivor, which only showed up past image 100.
@@ -52,6 +53,8 @@ python check_parity.py --images $IMAGES --n 500 \
     --cmp onnx:yolov8n_dyn.onnx:cuda \
     --cmp onnx:yolov8n.onnx:cpu \
     --cmp tensorrt:yolov8n_fp16.engine \
+    --cmp tensorrt:yolov8n_int8.engine \
+    --cmp tensorrt:yolov8n_int8_fp16head.engine \
     || { echo "exports disagree with the baseline — fix that before measuring"; exit 1; }
 
 echo "=== benchmark ==="
